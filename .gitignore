@@ -1,0 +1,21 @@
+node_modules/
+
+# Electron build output
+dist/
+out/
+
+# Per-workspace data files (generated, user-specific)
+.ogx-tags.json
+.ogx-view-cards.json
+.ogx-history.log
+
+# Legacy data files
+.explorerplus-tags.json
+.explorerplus-view-cards.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

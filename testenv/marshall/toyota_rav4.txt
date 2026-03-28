@@ -1,0 +1,12 @@
+Vehicle: 2021 Toyota RAV4 LE
+Nickname: Trail Finch
+Odometer: 39,210 miles
+Condition: Excellent condition overall. No visible body damage and tires have strong tread depth.
+Recent Service:
+- Oil and inspection at 38,500 miles
+- Wiper blades replaced at 37,000 miles
+- Brake fluid inspection passed at 36,200 miles
+Known Issues:
+- Small squeak from cargo cover when driving on rough roads
+- Infotainment Bluetooth reconnect is sometimes slow
+Notes: Family and road-trip vehicle, mostly highway usage.

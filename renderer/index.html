@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenGraphXplorer</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="top-bar">
+        <span class="brand">OpenGraphXplorer</span>
+        <button type="button" id="pickRootBtn" class="btn-ghost">Pick root</button>
+        <button type="button" id="useTestenvBtn" class="btn-ghost">./testenv</button>
+        <button type="button" id="refreshBtn" class="btn-ghost">Refresh</button>
+        <span id="rootLabel" class="root-label">No folder selected</span>
+        <div id="wsStatusBar" class="ws-status" aria-live="polite"></div>
+      </header>
+
+      <nav class="app-tab-bar" id="appTabBar" aria-label="Window tabs">
+        <div class="app-tab-strip" id="appTabStrip" role="tablist"></div>
+      </nav>
+
+      <div class="window-body">
+      <div class="stage" id="workspaceStage">
+        <div class="graph-layer chalkboard">
+          <canvas id="graphCanvas" aria-label="Folder graph"></canvas>
+          <div class="canvas-command">
+            <form id="terminalForm" class="terminal-form" autocomplete="off">
+              <span class="prompt">&gt;</span>
+              <input
+                id="terminalInput"
+                type="text"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="help · settings · filter … · scroll wheel zoom"
+              />
+            </form>
+          </div>
+        </div>
+        <div class="resize-col" id="resizeCol" title="Drag to resize" role="separator" aria-orientation="vertical"></div>
+        <aside class="glass-pane" id="glassPane">
+          <div class="glass-inner">
+            <div id="tagBar" class="tag-bar" aria-label="Active tags"></div>
+            <section class="glass-section glass-section--main">
+              <h2 class="glass-heading">Reader</h2>
+              <div id="workspaceDeck" class="workspace-deck"></div>
+            </section>
+            <div class="selection-panel">
+              <div id="selectHistory" class="select-history" aria-label="Selection history"></div>
+              <div id="selectionHud" class="selection-hud" aria-live="polite"></div>
+            </div>
+          </div>
+        </aside>
+      </div>
+      <div class="browse-mount" id="browseMount" hidden aria-hidden="true"></div>
+      </div>
+    </div>
+
+    <script src="./model.js"></script>
+    <script src="./browse-mount.js"></script>
+    <script src="./renderer.js"></script>
+  </body>
+</html>

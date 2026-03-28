@@ -1,0 +1,12 @@
+Vehicle: 2018 Jeep Wrangler Sport
+Nickname: Dust Runner
+Odometer: 88,120 miles
+Condition: Good condition with moderate off-road wear. Undercarriage cleaned and treated for corrosion prevention.
+Recent Service:
+- Differential fluid replaced at 86,500 miles
+- New front shocks at 84,000 miles
+- Brake inspection and pad adjustment at 87,200 miles
+Known Issues:
+- Soft top zipper sticks in cold weather
+- Minor steering wheel vibration above 65 mph
+Notes: Weekend off-road vehicle with frequent trail and camping trips.

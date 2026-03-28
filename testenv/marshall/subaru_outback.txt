@@ -1,0 +1,12 @@
+Vehicle: 2020 Subaru Outback Premium
+Nickname: North Star
+Odometer: 52,640 miles
+Condition: Very good condition. Paint and interior are clean; no mechanical warning lights.
+Recent Service:
+- Oil and multi-point inspection at 51,900 miles
+- New battery installed at 50,200 miles
+- Tire rotation and balancing at 49,700 miles
+Known Issues:
+- Small rattle from front passenger door panel on rough pavement
+- Rear hatch sensor occasionally needs a second press
+Notes: Mixed family and light outdoor use, mostly highway and mountain drives.

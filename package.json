@@ -1,0 +1,22 @@
+{
+  "name": "opengraphxplorer",
+  "version": "0.1.0",
+  "description": "Force-directed graph explorer for local files and folders.",
+  "packageManager": "pnpm@10.33.0",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "test:pipeline": "node test/pipeline-apply.test.cjs",
+    "test:selection": "node test/selection.test.cjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "electron": "^41.1.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["electron"]
+  }
+}

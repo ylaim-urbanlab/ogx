@@ -1,0 +1,12 @@
+Vehicle: 2014 Chevrolet Silverado 1500 LT
+Nickname: Iron Ridge
+Odometer: 146,905 miles
+Condition: Fair to good condition. Engine runs strong, but exterior has several paint scratches and one dent on rear bumper.
+Recent Service:
+- Transmission fluid service at 145,700 miles
+- Spark plugs replaced at 142,300 miles
+- New all-terrain rear tires installed at 144,900 miles
+Known Issues:
+- Check engine light appears intermittently for evap system code
+- Driver-side power window motor is slow
+Notes: Backup work truck, often used for towing a utility trailer.

@@ -1,0 +1,12 @@
+Vehicle: 2019 Honda Civic EX
+Nickname: Silver Comet
+Odometer: 74,880 miles
+Condition: Very good condition. Clean interior, no accident history, paint still glossy.
+Recent Service:
+- Synthetic oil and filter at 73,900 miles
+- Cabin air filter replaced at 72,000 miles
+- Four-wheel alignment completed in early 2026
+Known Issues:
+- Light vibration at highway speed likely from tire balance
+- Rear right speaker occasionally crackles
+Notes: Daily commuter car with mostly city and suburban mileage.

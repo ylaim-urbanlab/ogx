@@ -1,0 +1,12 @@
+Vehicle: 2016 Ford F-150 XLT
+Nickname: Blue Ox
+Odometer: 128,430 miles
+Condition: Good working condition. Small rust spot on rear wheel arch. Minor windshield chip repaired.
+Recent Service:
+- Oil change and tire rotation at 127,900 miles
+- Front brake pads replaced at 124,200 miles
+- Battery replaced in 2025
+Known Issues:
+- AC takes a few minutes to cool in hot weather
+- Tailgate latch occasionally sticks
+Notes: Used mostly for hauling tools and weekend hardware runs.
