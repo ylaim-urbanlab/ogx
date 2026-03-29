@@ -30,4 +30,6 @@ contextBridge.exposeInMainWorld("explorerApi", {
   readFilesBatch: (rootDir, relPaths) => ipcRenderer.invoke("read-files-batch", rootDir, relPaths),
   loadConcepts: (rootDir) => ipcRenderer.invoke("load-concepts", rootDir),
   saveConcepts: (rootDir, data) => ipcRenderer.invoke("save-concepts", rootDir, data),
+  loadMediaIndex: (rootDir) => ipcRenderer.invoke("load-media-index", rootDir),
+  saveMediaIndex: (rootDir, data) => ipcRenderer.invoke("save-media-index", rootDir, data),
 });

@@ -464,6 +464,9 @@
       if (op === "head") {
         const n = Math.max(0, parseInt(rest, 10) || 0);
         pipeline.push({ op: "head", n: n || 6 });
+      } else if (op === "tail") {
+        const n = Math.max(0, parseInt(rest, 10) || 0);
+        pipeline.push({ op: "tail", n: n || 6 });
       } else if (op === "grep") {
         let pat = rest;
         const q = rest.match(/^"([^"]*)"$|^'([^']*)'$/);
@@ -496,6 +499,10 @@
         const lines = t.split(/\r?\n/);
         const n = step.n || 6;
         t = lines.slice(0, n).join("\n");
+      } else if (step.op === "tail") {
+        const lines = t.split(/\r?\n/);
+        const n = step.n || 6;
+        t = lines.slice(-n).join("\n");
       } else if (step.op === "grep") {
         const pat = step.pattern || "";
         const lines = t.split(/\r?\n/);

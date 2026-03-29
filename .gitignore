@@ -19,3 +19,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Local PDF test fixtures
+docs/testenvpdfs/

@@ -212,6 +212,30 @@
       pre.className = "text-preview";
       pre.textContent = data.text || "";
       wrap.appendChild(pre);
+    } else if (data.variant === "pdf") {
+      const meta = document.createElement("p");
+      meta.textContent = `PDF${data.pageCount != null ? ` · ${data.pageCount} page${data.pageCount === 1 ? "" : "s"}` : ""}${
+        data.size != null ? ` · ${fmtSize(data.size)}` : ""
+      }`;
+      wrap.appendChild(meta);
+      const frameWrap = document.createElement("div");
+      frameWrap.className = "browse-embed-pdfwrap";
+      const frame = document.createElement("iframe");
+      frame.className = "browse-embed-pdf";
+      frame.src = data.pdfUrl;
+      frame.title = data.name;
+      frameWrap.appendChild(frame);
+      wrap.appendChild(frameWrap);
+      if (data.text) {
+        const sec = document.createElement("p");
+        sec.className = "browse-embed-section";
+        sec.textContent = data.truncated ? "Extracted text (partial)" : "Extracted text";
+        wrap.appendChild(sec);
+        const pre = document.createElement("pre");
+        pre.className = "browse-embed-pre";
+        pre.textContent = data.text;
+        wrap.appendChild(pre);
+      }
     } else {
       const p = document.createElement("p");
       p.innerHTML = `Binary or unknown type — <strong>${esc(data.name)}</strong>${

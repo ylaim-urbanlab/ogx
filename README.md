@@ -2,7 +2,9 @@
 
 A local-first desktop tool for exploring folders as **interactive force-directed graphs**.
 
-Load a folder. Watch it become a graph. Filter, link, tag, and query your files — without a database or index.
+Load a folder. Watch it become a graph. Filter, link, tag, and query your files — without a mandatory database or background index.
+
+Latest updates: [CHANGELOG.md](CHANGELOG.md)
 
 ---
 
@@ -10,9 +12,9 @@ Load a folder. Watch it become a graph. Filter, link, tag, and query your files 
 
 Most file explorers show you a tree. OpenGraphXplorer shows you a **graph that you can reshape** — pulling related files together by extension, shared tags, content patterns, or import chains. The layout emerges from what you're interested in, not just where the files happen to live.
 
-The right panel is the **reader deck** — a working set of files showing live previews, pipeline-filtered text, and CSV columns. The left is the graph canvas. A CLI at the bottom drives everything.
+The right panel is the **reader deck** — a working set of files showing live previews, pipeline-filtered text, CSV columns, and extracted PDF text. The left is the graph canvas. A CLI at the bottom drives everything.
 
-No background indexing. No database. Everything runs on-demand over the files you're looking at.
+No mandatory background indexing. No database server. Everything runs on-demand over the files you're looking at, with explicit saved indexes only when you ask for them.
 
 ---
 
@@ -169,6 +171,8 @@ Stored alongside your files in the root folder:
 | File | Contents |
 |---|---|
 | `.ogx-tags.json` | Tags per file path |
+| `.ogx-concepts.json` | Concept nodes and typed edges |
+| `.ogx-media-index.json` | Stored media/query representations |
 | `.ogx-view-cards.json` | Saved view cards per folder |
 | `.ogx-history.log` | Timestamped command log |
 

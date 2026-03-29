@@ -18,6 +18,11 @@
     "electron": "^41.1.0"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["electron"]
+    "onlyBuiltDependencies": [
+      "electron"
+    ]
+  },
+  "dependencies": {
+    "pdf-parse": "^2.4.5"
   }
 }

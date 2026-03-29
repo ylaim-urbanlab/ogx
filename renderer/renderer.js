@@ -64,11 +64,12 @@ const state = {
   extraLinkEndpoints: new Set(), // relPaths of nodes that have ≥1 extra link
   concepts: {},        // { [name]: {} } — runtime only until concept save
   conceptEdges: [],    // [{ from, to, type }] — directional typed edges
+  mediaIndex: { files: {} },
   highlight: null,
   extSelection: null,
   wsExpansion: null,
   selection: { relPath: null },
-  cardRender: { pipeline: [] },
+  cardRender: { pipeline: [], sourceIndex: null },
   // Click cycle: tracks which node was last clicked and how many times,
   // so repeated clicks on the same node cycle through expansion modes.
   clickCycle: { nodeId: null, step: 0 },
@@ -122,6 +123,7 @@ const state = {
 const els = {
   pickRootBtn: document.getElementById("pickRootBtn"),
   useTestenvBtn: document.getElementById("useTestenvBtn"),
+  useTestenvPdfsBtn: document.getElementById("useTestenvPdfsBtn"),
   refreshBtn: document.getElementById("refreshBtn"),
   rootLabel: document.getElementById("rootLabel"),
   graphCanvas: document.getElementById("graphCanvas"),
@@ -334,10 +336,308 @@ function getWorkingSetItems() {
   return state.fsSnapshot.items.filter((i) => workingSet.has(i.relPath));
 }
 
+function buildVisibleGraphNodeIds() {
+  const ids = new Set([ROOT_ID]);
+  for (const item of getWorkingSetItems()) {
+    let rel = item.relPath;
+    while (true) {
+      ids.add(itemIdFromRelPath(rel));
+      if (!rel) {
+        break;
+      }
+      rel = parentRelPath(rel);
+    }
+  }
+  return ids;
+}
+
+function mediaEntryForRelPath(relPath) {
+  const rel = normRel(relPath || "");
+  return (state.mediaIndex && state.mediaIndex.files && state.mediaIndex.files[rel]) || null;
+}
+
+function fileExtLower(item) {
+  if (!item || !item.name) return "";
+  const idx = item.name.lastIndexOf(".");
+  return idx >= 0 && idx < item.name.length - 1 ? item.name.slice(idx + 1).toLowerCase() : "";
+}
+
+function isPdfItem(item) {
+  return fileExtLower(item) === "pdf";
+}
+
+function isImageItem(item) {
+  const ext = `.${fileExtLower(item)}`;
+  return new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico"]).has(ext);
+}
+
+function summarizeQueryContent(text, max = 120) {
+  const oneLine = String(text || "").replace(/\s+/g, " ").trim();
+  return oneLine.length > max ? `${oneLine.slice(0, max)}…` : (oneLine || "—");
+}
+
+function buildDefaultIndexedMeta(item, preview) {
+  const ext = fileExtLower(item);
+  const bits = [item.name];
+  if (isPdfItem(item)) bits.push("PDF");
+  if (isImageItem(item)) bits.push("Image");
+  if (preview && preview.pageCount != null) bits.push(`pages ${preview.pageCount}`);
+  if (item.size != null) bits.push(formatBytes(item.size));
+  if (preview && preview.title) bits.push(`title ${preview.title}`);
+  return {
+    kind: isPdfItem(item) ? "pdf" : (isImageItem(item) ? "image" : "file"),
+    title: (preview && preview.title) || item.name,
+    text: bits.join("\n"),
+    sizeBytes: item.size ?? null,
+    pageCount: preview && preview.pageCount != null ? preview.pageCount : null,
+  };
+}
+
+function renderIndexedQueriesSummary(item, sectionsHost) {
+  const entry = mediaEntryForRelPath(item.relPath);
+  const queries = entry && Array.isArray(entry.queries) ? entry.queries : [];
+  if (!queries.length) {
+    return;
+  }
+  const wrap = document.createElement("div");
+  wrap.className = "file-card-mdsec";
+  const lab = document.createElement("div");
+  lab.className = "seg-label";
+  lab.textContent = `${entry.kind === "pdf" ? "PDF" : "Media"} · ${queries.length} quer${queries.length === 1 ? "y" : "ies"}`;
+  wrap.appendChild(lab);
+  queries.forEach((q, i) => {
+    const seg = document.createElement("div");
+    seg.className = "file-card-seg file-card-seg-md";
+    seg.textContent = `[${i}] ${String(q.key || "").toUpperCase()}: ${summarizeQueryContent(q.preview || q.content)}`;
+    wrap.appendChild(seg);
+  });
+  sectionsHost.appendChild(wrap);
+}
+
+function parseStoredSourceSpec(raw) {
+  const trimmed = String(raw || "").trim();
+  const m = trimmed.match(/^\[(\d+)\](?:\s*\|\s*(.*))?$/);
+  if (!m) {
+    return { sourceIndex: null, pipelineText: trimmed };
+  }
+  return { sourceIndex: parseInt(m[1], 10), pipelineText: (m[2] || "").trim() };
+}
+
+function currentFileSelectionItem() {
+  const focus = state.selection.relPath || state.workspace.selectedCardRelPath;
+  if (focus) {
+    return findItemByRelPathFlexible(focus);
+  }
+  const sel = getSelectedItem();
+  return sel && sel.type === "file" ? sel : null;
+}
+
+function currentLoadItems() {
+  const focused = currentFileSelectionItem();
+  if (focused && focused.type === "file") {
+    return [focused];
+  }
+  return getWorkingSetItems().filter((item) => item.type === "file");
+}
+
+function serializePipeline(pipeline) {
+  return (pipeline || []).map((s) => {
+    if (s.op === "head" || s.op === "tail") return `${s.op} ${s.n}`;
+    if (s.op === "grep" || s.op === "regex") return `${s.op} ${s.pattern != null ? s.pattern : ""}`;
+    if (s.op === "col") return `col ${(s.cols || []).map((c) => c + 1).join(",")}`;
+    return s.op;
+  }).join(" | ");
+}
+
+function matchingQueryIndex(queries, key) {
+  return (queries || []).findIndex((q) => String(q.key || "").toLowerCase() === String(key || "").toLowerCase());
+}
+
+async function persistMediaIndex() {
+  if (!state.rootDir || !window.explorerApi.saveMediaIndex) return;
+  await window.explorerApi.saveMediaIndex(state.rootDir, state.mediaIndex);
+}
+
+async function getDefaultRenderSource(item) {
+  if (!item) return "";
+  if (isPdfItem(item) || isImageItem(item)) {
+    const entry = mediaEntryForRelPath(item.relPath);
+    const queries = entry && Array.isArray(entry.queries) ? entry.queries : [];
+    if (queries.length) {
+      return queries
+        .map((q, i) => `[${i}] ${String(q.key || "").toUpperCase()}\n${String(q.content || "")}`)
+        .join("\n\n");
+    }
+    return (entry && entry.meta && entry.meta.text) || buildDefaultIndexedMeta(item).text;
+  }
+  const ht = await window.explorerApi.fileHeadTail(
+    state.rootDir,
+    item.fullPath,
+    state.settings.cardHeadLines,
+    state.settings.cardTailLines,
+  );
+  if (!ht.ok) {
+    throw new Error(ht.error || "load failed");
+  }
+  return ht.merged ? ht.head : [ht.head, ht.tail].filter(Boolean).join("\n---\n");
+}
+
+async function getLoadableSource(item) {
+  if (!item) return { content: "", meta: buildDefaultIndexedMeta(item || { name: "", size: 0 }) };
+  let preview = null;
+  try {
+    preview = await window.explorerApi.fileCardPreview(state.rootDir, item.fullPath, state.settings.mdSectionTitles);
+  } catch {
+    preview = null;
+  }
+  const meta = buildDefaultIndexedMeta(item, preview && preview.ok ? preview : null);
+  if (isImageItem(item)) {
+    return { content: meta.text, meta };
+  }
+  if (isPdfItem(item)) {
+    const sn = await window.explorerApi.fileSnippet(state.rootDir, item.fullPath, 5 * 1024 * 1024);
+    if (!sn.ok) throw new Error(sn.error || "PDF load failed");
+    return { content: sn.text || "", meta };
+  }
+  const sn = await window.explorerApi.fileSnippet(state.rootDir, item.fullPath, 2 * 1024 * 1024);
+  if (!sn.ok) throw new Error(sn.error || "load failed");
+  return { content: sn.text || "", meta };
+}
+
+async function applyLoadCommand(mode, specText) {
+  const items = currentLoadItems();
+  if (!items.length) {
+    logLine("load: no files in current scope");
+    return;
+  }
+  const spec = String(specText || "").trim();
+  if (!spec) {
+    logLine("usage: load all | load <pipeline> | +load <pipeline> | -load <pipeline>");
+    return;
+  }
+
+  let key;
+  if (spec.toLowerCase() === "all") {
+    key = "all";
+  } else {
+    const pipeline = EP.parseCardRenderPipeline(spec);
+    if (!pipeline.length) {
+      logLine("load: invalid pipeline");
+      return;
+    }
+    key = serializePipeline(pipeline);
+  }
+
+  const singleItem = items.length === 1 ? items[0] : null;
+  if (mode === "remove") {
+    let removed = 0;
+    pushCliUndo();
+    for (const item of items) {
+      const rel = normRel(item.relPath);
+      const existing = mediaEntryForRelPath(rel);
+      const queries = existing && Array.isArray(existing.queries) ? [...existing.queries] : [];
+      const idx = matchingQueryIndex(queries, key);
+      if (idx < 0) {
+        continue;
+      }
+      removed += 1;
+      queries.splice(idx, 1);
+      if (existing) {
+        state.mediaIndex.files[rel] = { ...existing, queries };
+      } else {
+        delete state.mediaIndex.files[rel];
+      }
+      if (singleItem && Number.isInteger(state.cardRender.sourceIndex)) {
+        if (state.cardRender.sourceIndex === idx) {
+          state.cardRender = { pipeline: [], sourceIndex: null };
+        } else if (state.cardRender.sourceIndex > idx) {
+          state.cardRender = { ...state.cardRender, sourceIndex: state.cardRender.sourceIndex - 1 };
+        }
+      }
+    }
+    if (!removed) {
+      state.cliUndoStack.pop();
+      logLine(`load: not found "${key}"`);
+      return;
+    }
+    await persistMediaIndex();
+    logLine(`-load: removed "${key}" from ${removed} file(s)`);
+    renderWorkspaceDeck();
+    return;
+  }
+
+  pushCliUndo();
+  const pipeline = key === "all" ? [] : EP.parseCardRenderPipeline(spec);
+  let changed = 0;
+  let failed = 0;
+  let lastRenderIndex = null;
+  for (const item of items) {
+    try {
+      const rel = normRel(item.relPath);
+      const existing = mediaEntryForRelPath(rel);
+      const queries = existing && Array.isArray(existing.queries) ? existing.queries : [];
+      const idx = matchingQueryIndex(queries, key);
+      const source = await getLoadableSource(item);
+      const entry = existing || { kind: source.meta.kind, meta: source.meta, queries: [] };
+      let content;
+      entry.kind = source.meta.kind;
+      entry.meta = source.meta;
+      entry.queries = Array.isArray(entry.queries) ? entry.queries : [];
+      if (key === "all") {
+        content = source.content;
+      } else {
+        content = EP.applyPipelineToText(source.content, pipeline);
+      }
+      const preview = summarizeQueryContent(content);
+      const query = {
+        key,
+        content,
+        preview,
+        truncated: String(content).length > 240,
+        updatedAt: new Date().toISOString(),
+      };
+      if (mode === "replace") {
+        entry.queries = [query];
+      } else if (idx < 0) {
+        entry.queries.push(query);
+      } else {
+        entry.queries[idx] = query;
+      }
+      state.mediaIndex.files[rel] = entry;
+      lastRenderIndex = matchingQueryIndex(entry.queries, key);
+      changed += 1;
+    } catch (err) {
+      failed += 1;
+      logLine(`load: ${item.relPath} failed (${String(err && err.message ? err.message : err)})`);
+    }
+  }
+  if (!changed) {
+    state.cliUndoStack.pop();
+    logLine("load: no files updated");
+    return;
+  }
+  await persistMediaIndex();
+  if (singleItem && Number.isInteger(lastRenderIndex)) {
+    state.cardRender = { pipeline: [], sourceIndex: lastRenderIndex };
+    state.readerPipelineMatchByRel.clear();
+  }
+  renderWorkspaceDeck();
+  const prefix = mode === "add" ? "+load" : "load";
+  const suffix = failed ? ` (${failed} failed)` : "";
+  if (singleItem && Number.isInteger(lastRenderIndex)) {
+    logLine(`${prefix}: stored "${key}" as [${lastRenderIndex}]${suffix}`);
+    return;
+  }
+  logLine(`${prefix}: stored "${key}" in ${changed} file(s)${suffix}`);
+}
+
 function snapshotCliState() {
   const ext = state.extSelection;
   return {
-    cardRender: { pipeline: [...(state.cardRender.pipeline || [])] },
+    cardRender: {
+      pipeline: [...(state.cardRender.pipeline || [])],
+      sourceIndex: Number.isInteger(state.cardRender.sourceIndex) ? state.cardRender.sourceIndex : null,
+    },
     selectionRel: state.selection.relPath,
     selectedCardRel: state.workspace.selectedCardRelPath,
     extSelection: ext ? { ext: ext.ext, folderIds: [...ext.folderIds] } : null,
@@ -350,7 +650,10 @@ function snapshotCliState() {
 }
 
 function restoreCliState(s) {
-  state.cardRender = { pipeline: [...(s.cardRender.pipeline || [])] };
+  state.cardRender = {
+    pipeline: [...(s.cardRender.pipeline || [])],
+    sourceIndex: Number.isInteger(s.cardRender && s.cardRender.sourceIndex) ? s.cardRender.sourceIndex : null,
+  };
   state.selection.relPath = s.selectionRel;
   state.workspace.selectedCardRelPath = s.selectedCardRel;
   if (s.extSelection) {
@@ -697,7 +1000,7 @@ function updateWsBar() {
 /** Pipeline applies to all reader cards when nothing is selected; otherwise only the active file. */
 function shouldApplyCardRender(relPath) {
   const cr = state.cardRender;
-  if (!cr.pipeline || !cr.pipeline.length) {
+  if ((!cr.pipeline || !cr.pipeline.length) && !Number.isInteger(cr.sourceIndex)) {
     return false;
   }
   const focus = state.selection.relPath || state.workspace.selectedCardRelPath;
@@ -1289,20 +1592,29 @@ async function runPipelinedCardPreview(job) {
   titleEl.textContent = item.name;
 
   body.querySelectorAll("img.file-card-hero").forEach((el) => el.remove());
-
-  const ht = await window.explorerApi.fileHeadTail(state.rootDir, item.fullPath, hl, tl);
+  let sourceText = "";
+  let sourceError = "";
+  if (Number.isInteger(state.cardRender.sourceIndex)) {
+    const entry = mediaEntryForRelPath(item.relPath);
+    const q = entry && Array.isArray(entry.queries) ? entry.queries[state.cardRender.sourceIndex] : null;
+    if (q) {
+      sourceText = String(q.content || "");
+    } else {
+      sourceError = `stored query [${state.cardRender.sourceIndex}] not found`;
+    }
+  } else {
+    try {
+      sourceText = await getDefaultRenderSource(item);
+    } catch (err) {
+      sourceError = String(err && err.message ? err.message : err);
+    }
+  }
+  if (!card.isConnected) return;
+  const rawOut = EP.applyPipelineToText(sourceText, state.cardRender.pipeline);
   if (!card.isConnected) {
     return;
   }
-  let merged = "";
-  if (ht.ok) {
-    merged = ht.merged ? ht.head : [ht.head, ht.tail].filter(Boolean).join("\n---\n");
-  }
-  const rawOut = EP.applyPipelineToText(merged, state.cardRender.pipeline);
-  if (!card.isConnected) {
-    return;
-  }
-  const displayOut = ht.ok ? rawOut || "—" : rawOut || ht.error || "—";
+  const displayOut = sourceError ? rawOut || sourceError || "—" : rawOut || "—";
   pipelineHost.textContent = displayOut;
   state.readerPipelineMatchByRel.set(normRel(item.relPath), Boolean(String(rawOut || "").trim()));
   updateWsBar();
@@ -1324,6 +1636,8 @@ async function runDeckCardLoad(job) {
     body,
     pathEl,
     pipelineHost,
+    headLabel,
+    tailLabel,
     hl,
     tl,
   } = job;
@@ -1332,7 +1646,11 @@ async function runDeckCardLoad(job) {
     return;
   }
 
-  if (EP && shouldApplyCardRender(relPath) && state.cardRender.pipeline && state.cardRender.pipeline.length) {
+  if (
+    EP &&
+    shouldApplyCardRender(relPath) &&
+    ((state.cardRender.pipeline && state.cardRender.pipeline.length) || Number.isInteger(state.cardRender.sourceIndex))
+  ) {
     await runPipelinedCardPreview(job);
     return;
   }
@@ -1344,6 +1662,15 @@ async function runDeckCardLoad(job) {
   const extLower =
     idxDot >= 0 && idxDot < item.name.length - 1 ? item.name.slice(idxDot + 1).toLowerCase() : "";
   const isCsvLike = extLower === "csv" || extLower === "tsv";
+  const isPdf = extLower === "pdf";
+  const usePdfDefaults =
+    isPdf &&
+    hl === DEFAULT_SETTINGS.cardHeadLines &&
+    tl === DEFAULT_SETTINGS.cardTailLines;
+  const previewHeadLines = usePdfDefaults ? 12 : hl;
+  const previewTailLines = usePdfDefaults ? 0 : tl;
+  headLabel.textContent = `head(${previewHeadLines})`;
+  tailLabel.textContent = `tail(${previewTailLines})`;
 
   let res;
   try {
@@ -1390,6 +1717,7 @@ async function runDeckCardLoad(job) {
       img.className = "file-card-hero";
       body.insertBefore(img, pathEl);
     }
+    renderIndexedQueriesSummary(item, sectionsHost);
     return;
   }
 
@@ -1399,6 +1727,7 @@ async function runDeckCardLoad(job) {
   if (kind === "binary") {
     abstractEl.textContent = `Binary · ${res.ext || ""} · ${res.sizeLabel || formatBytes(res.sizeBytes)}`;
     setHeadTailSectionsVisible(headWrap, tailWrap, false);
+    renderIndexedQueriesSummary(item, sectionsHost);
     return;
   }
 
@@ -1421,6 +1750,7 @@ async function runDeckCardLoad(job) {
     }
     abstractEl.textContent = colParts.join(" · ") + `\n${shapeStr}`;
     setHeadTailSectionsVisible(headWrap, tailWrap, false);
+    renderIndexedQueriesSummary(item, sectionsHost);
     return;
   }
 
@@ -1432,6 +1762,23 @@ async function runDeckCardLoad(job) {
     ].filter(Boolean);
     abstractEl.textContent = bits.join(" · ") + (res.sizeBytes != null ? ` · ${formatBytes(res.sizeBytes)}` : "");
     setHeadTailSectionsVisible(headWrap, tailWrap, false);
+    renderIndexedQueriesSummary(item, sectionsHost);
+    return;
+  }
+
+  if (kind === "pdf") {
+    const entry = mediaEntryForRelPath(item.relPath);
+    const queryCount = entry && Array.isArray(entry.queries) ? entry.queries.length : 0;
+    const bits = [
+      "PDF",
+      res.pageCount != null ? `${res.pageCount} page${res.pageCount === 1 ? "" : "s"}` : "",
+      queryCount ? `${queryCount} quer${queryCount === 1 ? "y" : "ies"}` : "",
+      res.sizeBytes != null ? formatBytes(res.sizeBytes) : "",
+    ].filter(Boolean);
+    titleEl.textContent = res.name || item.name;
+    abstractEl.textContent = bits.join(" · ");
+    setHeadTailSectionsVisible(headWrap, tailWrap, false);
+    renderIndexedQueriesSummary(item, sectionsHost);
     return;
   }
 
@@ -1466,13 +1813,19 @@ async function runDeckCardLoad(job) {
       body.insertBefore(img, pathEl);
     }
     setHeadTailSectionsVisible(headWrap, tailWrap, false);
+    renderIndexedQueriesSummary(item, sectionsHost);
     return;
   }
 
   titleEl.textContent = res.name || item.name;
   abstractEl.textContent = `Text · ${res.ext || ""}${res.sizeBytes != null ? ` · ${formatBytes(res.sizeBytes)}` : ""}`;
   setHeadTailSectionsVisible(headWrap, tailWrap, true);
-  const ht = await window.explorerApi.fileHeadTail(state.rootDir, item.fullPath, hl, tl);
+  const ht = await window.explorerApi.fileHeadTail(
+    state.rootDir,
+    item.fullPath,
+    previewHeadLines,
+    previewTailLines,
+  );
   if (!card.isConnected) {
     return;
   }
@@ -1483,6 +1836,7 @@ async function runDeckCardLoad(job) {
     headSeg.textContent = ht.error || "—";
     tailSeg.textContent = "—";
   }
+  renderIndexedQueriesSummary(item, sectionsHost);
 }
 
 // Build the DOM for a single file card and return a job descriptor for async
@@ -1523,6 +1877,7 @@ function buildFileCard(item, card, rowIndex1) {
   pipelineHost.setAttribute("aria-label", "Custom render output");
 
   const headWrap = document.createElement("div");
+  headWrap.className = "file-card-seg-hidden";
   const headLabel = document.createElement("div");
   headLabel.className = "seg-label";
   headLabel.textContent = `head(${state.settings.cardHeadLines})`;
@@ -1531,6 +1886,7 @@ function buildFileCard(item, card, rowIndex1) {
   headSeg.textContent = "…";
 
   const tailWrap = document.createElement("div");
+  tailWrap.className = "file-card-seg-hidden";
   const tailLabel = document.createElement("div");
   tailLabel.className = "seg-label";
   tailLabel.textContent = `tail(${state.settings.cardTailLines})`;
@@ -1548,7 +1904,7 @@ function buildFileCard(item, card, rowIndex1) {
   pathEl.textContent = relPath;
 
   const sectionsHost = document.createElement("div");
-  sectionsHost.className = "file-card-sections";
+  sectionsHost.className = "file-card-sections hidden";
 
   body.appendChild(titleEl);
   body.appendChild(abstractEl);
@@ -1582,6 +1938,8 @@ function buildFileCard(item, card, rowIndex1) {
     body,
     pathEl,
     pipelineHost,
+    headLabel,
+    tailLabel,
     hl: state.settings.cardHeadLines,
     tl: state.settings.cardTailLines,
   };
@@ -1650,8 +2008,9 @@ function renderWorkspaceDeck() {
 }
 
 function buildGraph() {
-  // Update visible node set for nodeIsVisible() — text+tag pre-filter, no ext
-  state.view.visibleNodeIds = new Set(getFilteredSortedItems().map((i) => i.relPath));
+  // Graph visibility follows the current working set plus ancestor folders, so
+  // the graph matches the reader and selection summary instead of staying global.
+  state.view.visibleNodeIds = buildVisibleGraphNodeIds();
 
   const ctx = {
     state,
@@ -1699,6 +2058,9 @@ function nodeIsVisible(id) {
   }
   if (state.view.visibleNodeIds.has(id)) {
     return true;
+  }
+  if (state.view.selectedId === ROOT_ID) {
+    return false;
   }
   if (id === state.view.selectedId) {
     return true;
@@ -2401,6 +2763,7 @@ async function loadRoot(rootDir) {
   state.contentCacheReady = false;
   state.concepts = {};
   state.conceptEdges = [];
+  state.mediaIndex = { files: {} };
   await refreshFromDisk();
   // Load persisted concepts (fire-and-forget; graph rebuilds after)
   if (window.explorerApi.loadConcepts) {
@@ -2409,6 +2772,14 @@ async function loadRoot(rootDir) {
         state.concepts = data.concepts || {};
         state.conceptEdges = data.edges || [];
         buildGraph();
+        renderWorkspaceDeck();
+      }
+    }).catch(() => {});
+  }
+  if (window.explorerApi.loadMediaIndex) {
+    window.explorerApi.loadMediaIndex(rootDir).then((data) => {
+      if (data && data.files && state.rootDir === rootDir) {
+        state.mediaIndex = data;
         renderWorkspaceDeck();
       }
     }).catch(() => {});
@@ -2683,9 +3054,11 @@ async function parseCommand(rawInput) {
     logLine("  reader filter <text>   (secondary deck filter by name)");
     logLine("  reader sort name-asc|name-desc|type-asc|type-desc");
     logLine("── Render pipeline (display only — never changes the set) ───");
-    logLine("  render grep <pat> | head <n> | col <n,m> | regex <pat>  (chainable with |)");
+    logLine("  render grep <pat> | head <n> | tail <n> | col <n,m> | regex <pat>");
+    logLine("  render [0] | tail 20 | grep streets");
     logLine("  render reset");
     logLine("  render save|load|list|delete <name>");
+    logLine("  load all | load <pipeline> | +load <pipeline> | -load <pipeline>");
     logLine("── Tagging ─────────────────────────────────────");
     logLine("  tag <name>                    (tag selected node, or all visible reader rows)");
     logLine("  tag <name> where grep <pat>   (tag reader files matching pattern)");
@@ -2927,7 +3300,7 @@ async function parseCommand(rawInput) {
     state.workspace.filterText = "";
     state.workspace.pipelineResultFilter = null;
     state.workspace.selectedCardRelPath = null;
-    state.cardRender = { pipeline: [] };
+    state.cardRender = { pipeline: [], sourceIndex: null };
     state.readerPipelineMatchByRel.clear();
     state.view.selectedId = ROOT_ID;
     state.selection.relPath = null;
@@ -3032,15 +3405,11 @@ async function parseCommand(rawInput) {
     if (state.workspace.filterText.trim()) recipe.push(`reader filter ${state.workspace.filterText.trim()}`);
     if (state.workspace.sortMode && state.workspace.sortMode !== "manual") recipe.push(`reader sort ${state.workspace.sortMode}`);
     const cr = state.cardRender;
-    if (cr && cr.pipeline && cr.pipeline.length) {
-      const pipeStr = cr.pipeline.map((s) => {
-        if (s.op === "head") return `head ${s.n}`;
-        if (s.op === "grep" || s.op === "regex") return `${s.op} ${s.pattern != null ? s.pattern : ""}`;
-        if (s.op === "col") return `col ${(s.cols || []).map((c) => c + 1).join(",")}`;
-        return s.op;
-      }).join(" | ");
+    if (cr && ((cr.pipeline && cr.pipeline.length) || Number.isInteger(cr.sourceIndex))) {
+      const pipeStr = serializePipeline(cr.pipeline || []);
+      const srcPrefix = Number.isInteger(cr.sourceIndex) ? `[${cr.sourceIndex}]${pipeStr ? " | " : ""}` : "";
       const pfSuffix = state.workspace.pipelineResultFilter ? ` | ${state.workspace.pipelineResultFilter}` : "";
-      recipe.push(`render ${pipeStr}${pfSuffix}`);
+      recipe.push(`render ${srcPrefix}${pipeStr}${pfSuffix}`);
     } else if (state.workspace.pipelineResultFilter) {
       recipe.push(`reader ${state.workspace.pipelineResultFilter}`);
     }
@@ -3066,6 +3435,13 @@ async function parseCommand(rawInput) {
     return;
   }
 
+  if (lower.startsWith("load ") || lower.startsWith("+load ") || lower.startsWith("-load ")) {
+    const mode = lower.startsWith("+load ") ? "add" : (lower.startsWith("-load ") ? "remove" : "replace");
+    const spec = input.replace(/^[-+]?load\s*/i, "");
+    await applyLoadCommand(mode, spec);
+    return;
+  }
+
   if (lower.startsWith("card render")) {
     if (!EP) {
       logLine("card render unavailable");
@@ -3075,7 +3451,7 @@ async function parseCommand(rawInput) {
     const rlow = rest.toLowerCase();
     if (!rest || rlow === "reset") {
       pushCliUndo();
-      state.cardRender = { pipeline: [] };
+      state.cardRender = { pipeline: [], sourceIndex: null };
       state.readerPipelineMatchByRel.clear();
       state.workspace.pipelineResultFilter = null;
       appendSelectHistory("Card render: reset");
@@ -3107,7 +3483,7 @@ async function parseCommand(rawInput) {
         logLine(`no saved pipeline: ${name}`);
         return;
       }
-      state.cardRender = { pipeline: [...saved.pipeline] };
+      state.cardRender = { pipeline: [...saved.pipeline], sourceIndex: null };
       logLine(`loaded pipeline "${name}" (${state.cardRender.pipeline.length} steps)`);
       renderWorkspaceDeck();
       return;
@@ -3141,17 +3517,28 @@ async function parseCommand(rawInput) {
     const parsed = EP.parseCardRenderCommand(input);
     if (parsed.reset) {
       pushCliUndo();
-      state.cardRender = { pipeline: [] };
+      state.cardRender = { pipeline: [], sourceIndex: null };
       state.readerPipelineMatchByRel.clear();
       appendSelectHistory("Card render: reset");
       logLine("card render reset");
     } else {
+      const rawSpec = input.replace(/^card\s+render\s*/i, "").trim();
+      const src = parseStoredSourceSpec(rawSpec);
+      if (Number.isInteger(src.sourceIndex) && !currentFileSelectionItem()) {
+        logLine("render [n]: select a file first");
+        return;
+      }
       pushCliUndo();
-      state.cardRender = { pipeline: parsed.pipeline || [] };
+      state.cardRender = {
+        pipeline: EP.parseCardRenderPipeline(src.pipelineText),
+        sourceIndex: Number.isInteger(src.sourceIndex) ? src.sourceIndex : null,
+      };
       state.readerPipelineMatchByRel.clear();
-      appendSelectHistory(`Card render: ${state.cardRender.pipeline.length} step(s)`);
+      appendSelectHistory(
+        `Card render: ${Number.isInteger(state.cardRender.sourceIndex) ? `[${state.cardRender.sourceIndex}] ` : ""}${state.cardRender.pipeline.length} step(s)`,
+      );
       logLine(
-        `card render: ${state.cardRender.pipeline.length} step(s) — ${state.selection.relPath || state.workspace.selectedCardRelPath ? "scoped to selection" : "all reader cards"}`,
+        `card render: ${Number.isInteger(state.cardRender.sourceIndex) ? `[${state.cardRender.sourceIndex}] · ` : ""}${state.cardRender.pipeline.length} step(s) — ${state.selection.relPath || state.workspace.selectedCardRelPath ? "scoped to selection" : "all reader cards"}`,
       );
     }
     renderWorkspaceDeck();
@@ -4409,6 +4796,15 @@ els.useTestenvBtn.addEventListener("click", async () => {
     return;
   }
   await loadRoot(testenvPath);
+});
+
+els.useTestenvPdfsBtn.addEventListener("click", async () => {
+  const pdfsPath = await window.explorerApi.resolveDir("docs/testenvpdfs");
+  if (!pdfsPath) {
+    alert("No ./docs/testenvpdfs folder found next to the app.");
+    return;
+  }
+  await loadRoot(pdfsPath);
 });
 
 els.refreshBtn.addEventListener("click", async () => {

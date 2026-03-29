@@ -2,10 +2,12 @@ const { app, BrowserWindow, ipcMain, dialog, Menu, shell } = require("electron")
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { pathToFileURL, fileURLToPath } = require("node:url");
+const { PDFParse } = require("pdf-parse");
 
 const TAGS_FILE = ".ogx-tags.json";
 const CARDS_FILE = ".ogx-view-cards.json";
 const CONCEPTS_FILE = ".ogx-concepts.json";
+const MEDIA_INDEX_FILE = ".ogx-media-index.json";
 
 // Keep Chromium cache out of restricted synced folders (e.g. OneDrive).
 
@@ -147,6 +149,8 @@ const CSV_EXT = new Set([".csv", ".tsv"]);
 
 const IPYNB_EXT = new Set([".ipynb"]);
 
+const PDF_EXT = new Set([".pdf"]);
+
 const IMAGE_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico"]);
 
 /** Extensions we always treat as UTF-8 text (no binary sniff). */
@@ -162,6 +166,8 @@ const ALWAYS_TEXT_EXT = new Set([
   ".c", ".h", ".cpp", ".hpp", ".cs", ".swift", ".kt", ".sql", ".graphql",
   ".gitignore", ".gitattributes", ".editorconfig",
 ]);
+
+const pdfPreviewCache = new Map();
 
 function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -343,6 +349,39 @@ function formatBytes(n) {
   return `${(n / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
+function normalizePdfText(text) {
+  return String(text || "")
+    .replace(/\r/g, "")
+    .replace(/\u0000/g, "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+async function extractPdfPreview(fullPath) {
+  const stat = await fs.stat(fullPath);
+  const cached = pdfPreviewCache.get(fullPath);
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.sizeBytes === stat.size) {
+    return cached.data;
+  }
+
+  const data = await fs.readFile(fullPath);
+  const parser = new PDFParse({ data });
+  try {
+    const info = await parser.getInfo().catch(() => null);
+    const textResult = await parser.getText().catch(() => null);
+    const preview = {
+      pageCount: info && Number.isFinite(info.total) ? info.total : null,
+      text: normalizePdfText(textResult && textResult.text),
+      sizeBytes: stat.size,
+    };
+    pdfPreviewCache.set(fullPath, { mtimeMs: stat.mtimeMs, sizeBytes: stat.size, data: preview });
+    return preview;
+  } finally {
+    await parser.destroy().catch(() => {});
+  }
+}
+
 async function getFileCardPreview(rootDir, fullPath, sectionNames = []) {
   if (!rootDir || !fullPath) {
     return { ok: false, error: "missing path" };
@@ -363,6 +402,30 @@ async function getFileCardPreview(rootDir, fullPath, sectionNames = []) {
 
   const baseName = path.basename(fullPath);
   const ext = path.extname(fullPath).toLowerCase();
+
+  if (PDF_EXT.has(ext)) {
+    try {
+      const pdf = await extractPdfPreview(fullPath);
+      return {
+        ok: true,
+        kind: "pdf",
+        name: baseName,
+        ext,
+        sizeBytes: stat.size,
+        pageCount: pdf.pageCount,
+      };
+    } catch (err) {
+      return {
+        ok: true,
+        kind: "binary",
+        name: baseName,
+        ext,
+        sizeBytes: stat.size,
+        sizeLabel: formatBytes(stat.size),
+        error: String(err && err.message ? err.message : err),
+      };
+    }
+  }
 
   if (IMAGE_EXT.has(ext)) {
     return {
@@ -615,6 +678,17 @@ ipcMain.handle("save-concepts", async (_event, rootDir, data) => {
   return true;
 });
 
+ipcMain.handle("load-media-index", async (_event, rootDir) => {
+  const mediaIndexPath = path.join(rootDir, MEDIA_INDEX_FILE);
+  return readJson(mediaIndexPath, { files: {} });
+});
+
+ipcMain.handle("save-media-index", async (_event, rootDir, data) => {
+  const mediaIndexPath = path.join(rootDir, MEDIA_INDEX_FILE);
+  await writeJson(mediaIndexPath, data);
+  return true;
+});
+
 ipcMain.handle("load-cards", async (_event, folderPath) => {
   const cardsPath = path.join(folderPath, CARDS_FILE);
   const cards = await readJson(cardsPath, []);
@@ -695,6 +769,18 @@ async function readFileHeadTail(rootDir, fullPath, headN, tailN) {
     return { ok: false, error: "not a file" };
   }
 
+  const ext = path.extname(fullPath).toLowerCase();
+  if (PDF_EXT.has(ext)) {
+    try {
+      const pdf = await extractPdfPreview(fullPath);
+      const lines = (pdf.text || "").split(/\r?\n/);
+      const { head, tail, merged } = splitHeadTailLines(lines, headN, tailN);
+      return { ok: true, head, tail, merged, truncated: false };
+    } catch (err) {
+      return { ok: false, error: String(err && err.message ? err.message : err) };
+    }
+  }
+
   const maxBytes = 2 * 1024 * 1024;
   if (stat.size <= maxBytes) {
     const raw = await fs.readFile(fullPath, "utf8");
@@ -741,6 +827,16 @@ async function readFileSnippet(rootDir, fullPath, maxBytes) {
   }
   if (!stat.isFile()) {
     return { ok: false, error: "not a file" };
+  }
+  const ext = path.extname(fullPath).toLowerCase();
+  if (PDF_EXT.has(ext)) {
+    try {
+      const pdf = await extractPdfPreview(fullPath);
+      const limit = Math.max(0, maxBytes || 262144);
+      return { ok: true, text: limit ? (pdf.text || "").slice(0, limit) : "" };
+    } catch (err) {
+      return { ok: false, error: String(err && err.message ? err.message : err) };
+    }
   }
   const n = Math.min(maxBytes || 262144, stat.size);
   const buf = Buffer.alloc(n);
@@ -984,6 +1080,28 @@ ipcMain.handle("build-content-links", async (_event, { rootDir, files, strategy,
 async function buildBrowseFilePayload(rootDir, fullPath) {
   const ext = path.extname(fullPath).toLowerCase();
   const name = path.basename(fullPath);
+  if (PDF_EXT.has(ext)) {
+    try {
+      const pdf = await extractPdfPreview(fullPath);
+      const text = pdf.text || "";
+      const truncated = text.length > BROWSE_TEXT_MAX;
+      return {
+        ok: true,
+        mode: "file",
+        variant: "pdf",
+        name,
+        pdfUrl: pathToFileURL(fullPath).href,
+        text: truncated ? text.slice(0, BROWSE_TEXT_MAX) : text,
+        truncated,
+        pageCount: pdf.pageCount,
+        size: pdf.sizeBytes,
+        fullPath,
+      };
+    } catch {
+      const st = await fs.stat(fullPath);
+      return { ok: true, mode: "file", variant: "binary", name, size: st.size, fullPath };
+    }
+  }
   if (IMAGE_EXT.has(ext)) {
     const st = await fs.stat(fullPath);
     if (st.size > BROWSE_IMAGE_MAX) {

@@ -11,7 +11,7 @@ OpenGraphXplorer is a desktop app (Electron) for exploring a **folder root** as:
 1. A **force-directed graph** of folders/files (with zoom, pan, drag).
 2. A **Reader** panel listing **files** derived from a **working set** (filters + optional expansion).
 3. A **CLI** on the graph canvas for commands, plus a **fading log** (top-left) and a **persistent selection history** (right panel).
-4. **Browse tabs** (under the header): `open` adds an in-app tab for a file or folder (text/image preview, directory **detail** or **grid**). The Workspace tab is the graph + Reader; browse tabs can be closed with **×**.
+4. **Browse tabs** (under the header): `open` adds an in-app tab for a file or folder (text/image/PDF preview, directory **detail** or **grid**). The Workspace tab is the graph + Reader; browse tabs can be closed with **×**.
 
 There is **no global index**: previews and pipelines run over the current working set and selection, not a pre-built database.
 
