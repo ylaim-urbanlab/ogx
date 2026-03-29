@@ -202,6 +202,28 @@
     return { nodesById, links: allLinks };
   };
 
+  // ── Card renderer registry ────────────────────────────────────────────────
+  // Each renderer: (item, cardEl, rowIndex1) → job | null
+  //
+  //   item      — working set item { relPath, name, type, ... }
+  //   cardEl    — the card container div (class "file-card" already set by caller)
+  //   rowIndex1 — 1-based position in the deck
+  //
+  // The renderer should populate cardEl's DOM children and return a job
+  // descriptor for async content loading, or null for no async work.
+  //
+  // Unknown types fall back to the "file" renderer.
+
+  EP.CARD_RENDERERS = {};
+
+  EP.registerCardRenderer = function registerCardRenderer(type, fn) {
+    EP.CARD_RENDERERS[type] = fn;
+  };
+
+  EP.getCardRenderer = function getCardRenderer(type) {
+    return EP.CARD_RENDERERS[type] || EP.CARD_RENDERERS["file"] || null;
+  };
+
   // ── Backward-compatible wrapper ────────────────────────────────────────────
   // Kept so existing call-sites (tests, etc.) continue to work unchanged.
   EP.getBaseWorkingSetItems = function getBaseWorkingSetItems(state, getFilteredSortedItems) {

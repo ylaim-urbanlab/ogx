@@ -1382,6 +1382,108 @@ async function runDeckCardLoad(job) {
   }
 }
 
+// Build the DOM for a single file card and return a job descriptor for async
+// content loading. Returns null if there is no root loaded yet.
+// Registered as the "file" card renderer via EP.registerCardRenderer.
+function buildFileCard(item, card, rowIndex1) {
+  const relPath = item.relPath;
+
+  const row = document.createElement("div");
+  row.style.display = "flex";
+  row.style.gap = "8px";
+  row.style.alignItems = "flex-start";
+
+  const grip = document.createElement("button");
+  grip.type = "button";
+  grip.className = "file-card-open";
+  grip.textContent = "↗";
+  grip.title = "Open file in tab";
+  grip.addEventListener("click", (e) => {
+    e.stopPropagation();
+    parseCommand(`open "${relPath}"`);
+  });
+
+  const body = document.createElement("div");
+  body.style.flex = "1";
+  body.style.minWidth = "0";
+
+  const titleEl = document.createElement("h3");
+  titleEl.className = "file-card-title";
+  titleEl.textContent = item.name;
+
+  const abstractEl = document.createElement("p");
+  abstractEl.className = "file-card-abstract";
+  abstractEl.textContent = "Loading preview…";
+
+  const pipelineHost = document.createElement("div");
+  pipelineHost.className = "file-card-pipeline-out hidden";
+  pipelineHost.setAttribute("aria-label", "Custom render output");
+
+  const headWrap = document.createElement("div");
+  const headLabel = document.createElement("div");
+  headLabel.className = "seg-label";
+  headLabel.textContent = `head(${state.settings.cardHeadLines})`;
+  const headSeg = document.createElement("div");
+  headSeg.className = "file-card-seg file-card-seg-head";
+  headSeg.textContent = "…";
+
+  const tailWrap = document.createElement("div");
+  const tailLabel = document.createElement("div");
+  tailLabel.className = "seg-label";
+  tailLabel.textContent = `tail(${state.settings.cardTailLines})`;
+  const tailSeg = document.createElement("div");
+  tailSeg.className = "file-card-seg file-card-seg-tail";
+  tailSeg.textContent = "…";
+
+  headWrap.appendChild(headLabel);
+  headWrap.appendChild(headSeg);
+  tailWrap.appendChild(tailLabel);
+  tailWrap.appendChild(tailSeg);
+
+  const pathEl = document.createElement("div");
+  pathEl.className = "file-card-path";
+  pathEl.textContent = relPath;
+
+  const sectionsHost = document.createElement("div");
+  sectionsHost.className = "file-card-sections";
+
+  body.appendChild(titleEl);
+  body.appendChild(abstractEl);
+  body.appendChild(pipelineHost);
+  body.appendChild(sectionsHost);
+  body.appendChild(headWrap);
+  body.appendChild(tailWrap);
+  body.appendChild(pathEl);
+
+  row.appendChild(grip);
+  row.appendChild(body);
+  card.appendChild(row);
+
+  body.addEventListener("click", () => {
+    selectCardInDeck(relPath);
+  });
+
+  if (!state.rootDir) return null;
+  return {
+    card,
+    rowIndex1,
+    relPath,
+    item,
+    abstractEl,
+    titleEl,
+    headWrap,
+    tailWrap,
+    headSeg,
+    tailSeg,
+    sectionsHost,
+    body,
+    pathEl,
+    pipelineHost,
+    hl: state.settings.cardHeadLines,
+    tl: state.settings.cardTailLines,
+  };
+}
+
 function renderWorkspaceDeck() {
   const basePrune = getBaseReaderRowsForDisplay();
   const allowedRel = new Set(basePrune.map((r) => normRel(r.relPath)));
@@ -1408,111 +1510,22 @@ function renderWorkspaceDeck() {
   for (let idx = 0; idx < rows.length; idx += 1) {
     const item = rows[idx];
     const rowIndex1 = idx + 1;
-    const relPath = item.relPath;
+
     const card = document.createElement("div");
     card.className = "file-card";
-    if (state.workspace.selectedCardRelPath === relPath) {
+    if (state.workspace.selectedCardRelPath === item.relPath) {
       card.classList.add("selected");
     }
-    card.dataset.relPath = relPath;
+    card.dataset.relPath = item.relPath;
 
-    const row = document.createElement("div");
-    row.style.display = "flex";
-    row.style.gap = "8px";
-    row.style.alignItems = "flex-start";
-
-    const grip = document.createElement("button");
-    grip.type = "button";
-    grip.className = "file-card-open";
-    grip.textContent = "↗";
-    grip.title = "Open file in tab";
-    grip.addEventListener("click", (e) => {
-      e.stopPropagation();
-      parseCommand(`open "${relPath}"`);
-    });
-
-    const body = document.createElement("div");
-    body.style.flex = "1";
-    body.style.minWidth = "0";
-
-    const titleEl = document.createElement("h3");
-    titleEl.className = "file-card-title";
-    titleEl.textContent = item.name;
-
-    const abstractEl = document.createElement("p");
-    abstractEl.className = "file-card-abstract";
-    abstractEl.textContent = "Loading preview…";
-
-    const pipelineHost = document.createElement("div");
-    pipelineHost.className = "file-card-pipeline-out hidden";
-    pipelineHost.setAttribute("aria-label", "Custom render output");
-
-    const headWrap = document.createElement("div");
-    const headLabel = document.createElement("div");
-    headLabel.className = "seg-label";
-    headLabel.textContent = `head(${state.settings.cardHeadLines})`;
-    const headSeg = document.createElement("div");
-    headSeg.className = "file-card-seg file-card-seg-head";
-    headSeg.textContent = "…";
-
-    const tailWrap = document.createElement("div");
-    const tailLabel = document.createElement("div");
-    tailLabel.className = "seg-label";
-    tailLabel.textContent = `tail(${state.settings.cardTailLines})`;
-    const tailSeg = document.createElement("div");
-    tailSeg.className = "file-card-seg file-card-seg-tail";
-    tailSeg.textContent = "…";
-
-    headWrap.appendChild(headLabel);
-    headWrap.appendChild(headSeg);
-    tailWrap.appendChild(tailLabel);
-    tailWrap.appendChild(tailSeg);
-
-    const pathEl = document.createElement("div");
-    pathEl.className = "file-card-path";
-    pathEl.textContent = relPath;
-
-    const sectionsHost = document.createElement("div");
-    sectionsHost.className = "file-card-sections";
-
-    body.appendChild(titleEl);
-    body.appendChild(abstractEl);
-    body.appendChild(pipelineHost);
-    body.appendChild(sectionsHost);
-    body.appendChild(headWrap);
-    body.appendChild(tailWrap);
-    body.appendChild(pathEl);
-
-    row.appendChild(grip);
-    row.appendChild(body);
-    card.appendChild(row);
-
-    body.addEventListener("click", () => {
-      selectCardInDeck(relPath);
-    });
+    const nodeType = item.nodeType || item.type || "file";
+    const renderer = EP.getCardRenderer(nodeType);
+    if (renderer) {
+      const job = renderer(item, card, rowIndex1);
+      if (job) deckJobs.push(job);
+    }
 
     els.workspaceDeck.appendChild(card);
-
-    if (state.rootDir) {
-      deckJobs.push({
-        card,
-        rowIndex1,
-        relPath,
-        item,
-        abstractEl,
-        titleEl,
-        headWrap,
-        tailWrap,
-        headSeg,
-        tailSeg,
-        sectionsHost,
-        body,
-        pathEl,
-        pipelineHost,
-        hl: state.settings.cardHeadLines,
-        tl: state.settings.cardTailLines,
-      });
-    }
   }
 
   prioritizeDeckJobs(deckJobs);
@@ -3896,6 +3909,12 @@ els.terminalForm.addEventListener("submit", (event) => {
 window.addEventListener("resize", () => {
   resizeCanvas();
 });
+
+// ── Card renderer registration ─────────────────────────────────────────────
+// Register additional types here when new node types are introduced.
+// Unknown types fall back to "file" via EP.getCardRenderer.
+
+EP.registerCardRenderer("file", buildFileCard);
 
 // ── Graph source registration ──────────────────────────────────────────────
 // "filesystem" is always active. Additional sources (e.g. "research") register

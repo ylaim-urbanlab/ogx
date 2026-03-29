@@ -771,6 +771,55 @@ section("39. registerGraphSource — replaces source with same id");
   assert(EP.GRAPH_SOURCES.every((s) => s.id !== "dup-test"), "unregisterGraphSource: source removed");
 }
 
+// ── Card renderer registry tests ──────────────────────────────────────────
+
+section("40. registerCardRenderer — dispatch by type");
+{
+  const calls = [];
+  EP.registerCardRenderer("test-paper", (item, card, rowIndex1) => {
+    calls.push({ type: "test-paper", name: item.name });
+    return null;
+  });
+  EP.registerCardRenderer("file", (item, card, rowIndex1) => {
+    calls.push({ type: "file", name: item.name });
+    return null;
+  });
+
+  const mockItem = { relPath: "a.md", name: "a.md", type: "file" };
+  const mockCard = {};
+
+  EP.getCardRenderer("test-paper")(mockItem, mockCard, 1);
+  assert(calls.length === 1 && calls[0].type === "test-paper",
+    "dispatch: test-paper renderer called");
+
+  EP.getCardRenderer("file")(mockItem, mockCard, 2);
+  assert(calls.length === 2 && calls[1].type === "file",
+    "dispatch: file renderer called");
+
+  delete EP.CARD_RENDERERS["test-paper"];
+  delete EP.CARD_RENDERERS["file"];
+}
+
+section("41. getCardRenderer — unknown type falls back to 'file'");
+{
+  let fileCalled = false;
+  EP.registerCardRenderer("file", () => { fileCalled = true; return null; });
+
+  const renderer = EP.getCardRenderer("concept");
+  assert(renderer !== null, "fallback: renderer returned for unknown type");
+  renderer({}, {}, 1);
+  assert(fileCalled, "fallback: file renderer invoked for unknown type 'concept'");
+
+  delete EP.CARD_RENDERERS["file"];
+}
+
+section("42. getCardRenderer — returns null when no renderers registered");
+{
+  // CARD_RENDERERS is empty after previous cleanup
+  const renderer = EP.getCardRenderer("file");
+  assert(renderer === null, "no renderers: getCardRenderer returns null");
+}
+
 // ── Summary ────────────────────────────────────────────────────────────────
 
 console.log(`\n${"─".repeat(50)}`);
