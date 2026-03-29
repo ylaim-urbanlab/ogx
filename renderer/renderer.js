@@ -1532,35 +1532,16 @@ function renderWorkspaceDeck() {
 }
 
 function buildGraph() {
-  const existing = state.graph.nodesById;
-  const nodesById = new Map();
-  const links = [];
-  const allItems = state.fsSnapshot.items;
-  const filteredIds = new Set(getFilteredSortedItems().map((i) => i.relPath));
-  state.view.visibleNodeIds = filteredIds;
+  // Update visible node set for nodeIsVisible() — text+tag pre-filter, no ext
+  state.view.visibleNodeIds = new Set(getFilteredSortedItems().map((i) => i.relPath));
 
-  const cx = state.world.w * 0.5;
-  const cy = state.world.h * 0.5;
-  const rootPrev = existing.get(ROOT_ID);
-  nodesById.set(ROOT_ID, rootPrev || { id: ROOT_ID, x: cx, y: cy, vx: 0, vy: 0 });
+  const ctx = {
+    state,
+    existing: state.graph.nodesById,
+    world: state.world,
+  };
 
-  for (const item of allItems) {
-    const id = itemIdFromRelPath(item.relPath);
-    const prev = existing.get(id);
-    nodesById.set(
-      id,
-      prev || {
-        id,
-        x: cx + (Math.random() - 0.5) * 900,
-        y: cy + (Math.random() - 0.5) * 700,
-        vx: 0,
-        vy: 0,
-      },
-    );
-    const parentId = itemIdFromRelPath(parentRelPath(item.relPath));
-    links.push({ a: parentId, b: id });
-  }
-
+  const { nodesById, links } = EP.mergeGraphSources(EP.GRAPH_SOURCES, ctx);
   state.graph.nodesById = nodesById;
   state.graph.links = links;
 }
@@ -3914,6 +3895,33 @@ els.terminalForm.addEventListener("submit", (event) => {
 
 window.addEventListener("resize", () => {
   resizeCanvas();
+});
+
+// ── Graph source registration ──────────────────────────────────────────────
+// "filesystem" is always active. Additional sources (e.g. "research") register
+// themselves when their data is loaded and unregister on unload.
+
+EP.registerGraphSource({
+  id: "filesystem",
+  getNodes(ctx) {
+    const { state: s, world } = ctx;
+    const cx = world.w * 0.5;
+    const cy = world.h * 0.5;
+    const nodes = [{ id: ROOT_ID, x: cx, y: cy }];
+    for (const item of s.fsSnapshot.items) {
+      nodes.push({ id: itemIdFromRelPath(item.relPath) });
+    }
+    return nodes;
+  },
+  getLinks(ctx) {
+    const links = [];
+    for (const item of ctx.state.fsSnapshot.items) {
+      const id = itemIdFromRelPath(item.relPath);
+      const parentId = itemIdFromRelPath(parentRelPath(item.relPath));
+      links.push({ a: parentId, b: id });
+    }
+    return links;
+  },
 });
 
 applyChromeLayout();

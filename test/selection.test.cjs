@@ -646,6 +646,131 @@ section("32. registerFilter — custom filter type");
   delete EP.FILTER_HANDLERS["name-starts-with"];
 }
 
+// ── Graph source tests ─────────────────────────────────────────────────────
+
+const WORLD = { w: 4200, h: 3200 };
+const CX = WORLD.w * 0.5;
+const CY = WORLD.h * 0.5;
+
+function makeCtx(existing = new Map()) {
+  return { existing, world: WORLD };
+}
+
+section("33. mergeGraphSources — single source, correct nodes and links");
+{
+  const source = {
+    id: "test-fs",
+    getNodes: (ctx) => [
+      { id: ROOT_ID, x: ctx.world.w * 0.5, y: ctx.world.h * 0.5 },
+      { id: "folder/a.txt" },
+      { id: "folder/b.txt" },
+    ],
+    getLinks: () => [
+      { a: ROOT_ID, b: "folder" },
+      { a: "folder", b: "folder/a.txt" },
+      { a: "folder", b: "folder/b.txt" },
+    ],
+  };
+  const { nodesById, links } = EP.mergeGraphSources([source], makeCtx());
+  assert(nodesById.has(ROOT_ID), "single source: ROOT_ID node present");
+  assert(nodesById.has("folder/a.txt"), "single source: a.txt node present");
+  assert(nodesById.has("folder/b.txt"), "single source: b.txt node present");
+  assert(links.length === 3, "single source: 3 links");
+}
+
+section("34. mergeGraphSources — ROOT_ID gets center position when not in existing");
+{
+  const source = {
+    id: "test-center",
+    getNodes: (ctx) => [{ id: ROOT_ID, x: ctx.world.w * 0.5, y: ctx.world.h * 0.5 }],
+    getLinks: () => [],
+  };
+  const { nodesById } = EP.mergeGraphSources([source], makeCtx());
+  const root = nodesById.get(ROOT_ID);
+  assert(root.x === CX, "ROOT_ID x = world center x");
+  assert(root.y === CY, "ROOT_ID y = world center y");
+}
+
+section("35. mergeGraphSources — position preserved from existing");
+{
+  const existing = new Map([
+    ["folder/a.txt", { id: "folder/a.txt", x: 100, y: 200, vx: 1.5, vy: -0.5 }],
+  ]);
+  const source = {
+    id: "test-preserve",
+    getNodes: () => [{ id: "folder/a.txt" }, { id: "folder/b.txt" }],
+    getLinks: () => [],
+  };
+  const { nodesById } = EP.mergeGraphSources([source], makeCtx(existing));
+  const a = nodesById.get("folder/a.txt");
+  assert(a.x === 100 && a.y === 200, "existing node: position preserved");
+  assert(a.vx === 1.5 && a.vy === -0.5, "existing node: velocity preserved");
+  const b = nodesById.get("folder/b.txt");
+  assert(b.x !== undefined, "new node: gets a position");
+  assert(b.vx === 0 && b.vy === 0, "new node: starts at rest");
+}
+
+section("36. mergeGraphSources — two sources, node deduplication");
+{
+  const s1 = {
+    id: "s1",
+    getNodes: () => [{ id: "node-a" }, { id: "node-b" }],
+    getLinks: () => [{ a: "node-a", b: "node-b" }],
+  };
+  const s2 = {
+    id: "s2",
+    // node-b already exists; node-c is new
+    getNodes: () => [{ id: "node-b" }, { id: "node-c" }],
+    getLinks: () => [{ a: "node-b", b: "node-c" }],
+  };
+  const { nodesById, links } = EP.mergeGraphSources([s1, s2], makeCtx());
+  assert(nodesById.size === 3, "dedup: 3 unique nodes (a, b, c)");
+  assert(nodesById.has("node-a") && nodesById.has("node-b") && nodesById.has("node-c"),
+    "dedup: all three nodes present");
+  assert(links.length === 2, "dedup: links from both sources concatenated (2 total)");
+}
+
+section("37. mergeGraphSources — meta enrichment from later source");
+{
+  const s1 = {
+    id: "s1",
+    getNodes: () => [{ id: "paper-1", meta: { type: "file" } }],
+    getLinks: () => [],
+  };
+  const s2 = {
+    id: "s2",
+    // research source enriches the same node
+    getNodes: () => [{ id: "paper-1", meta: { type: "paper", title: "Did Highways Cause Suburbanization?" } }],
+    getLinks: () => [],
+  };
+  const { nodesById } = EP.mergeGraphSources([s1, s2], makeCtx());
+  const node = nodesById.get("paper-1");
+  assert(node.type === "paper", "meta enrichment: later source wins on type");
+  assert(node.title === "Did Highways Cause Suburbanization?", "meta enrichment: title added by second source");
+}
+
+section("38. mergeGraphSources — empty sources list produces empty graph");
+{
+  const { nodesById, links } = EP.mergeGraphSources([], makeCtx());
+  assert(nodesById.size === 0, "empty sources: no nodes");
+  assert(links.length === 0, "empty sources: no links");
+}
+
+section("39. registerGraphSource — replaces source with same id");
+{
+  EP.registerGraphSource({ id: "dup-test", getNodes: () => [{ id: "n1" }], getLinks: () => [] });
+  EP.registerGraphSource({ id: "dup-test", getNodes: () => [{ id: "n2" }], getLinks: () => [] });
+  const count = EP.GRAPH_SOURCES.filter((s) => s.id === "dup-test").length;
+  assert(count === 1, "registerGraphSource: only one entry per id");
+  const { nodesById } = EP.mergeGraphSources(
+    EP.GRAPH_SOURCES.filter((s) => s.id === "dup-test"),
+    makeCtx(),
+  );
+  assert(nodesById.has("n2") && !nodesById.has("n1"), "registerGraphSource: replacement source used");
+  EP.unregisterGraphSource("dup-test");
+  assert(EP.GRAPH_SOURCES.every((s) => s.id !== "dup-test"), "unregisterGraphSource: source removed");
+}
+
 // ── Summary ────────────────────────────────────────────────────────────────
 
 console.log(`\n${"─".repeat(50)}`);

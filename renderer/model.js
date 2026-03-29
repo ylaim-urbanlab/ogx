@@ -120,6 +120,88 @@
     return new Set(expanded.filter((i) => allowedSet.has(i.relPath)).map((i) => i.relPath));
   };
 
+  // ── Graph source registry ──────────────────────────────────────────────────
+  // Each source: { id, getNodes(ctx), getLinks(ctx) }
+  //
+  //   getNodes(ctx) → Array<{ id, x?, y?, meta? }>
+  //     x/y are used as initial position only when the node isn't already in
+  //     ctx.existing. Omit for random placement.
+  //
+  //   getLinks(ctx) → Array<{ a, b, kind? }>
+  //     These feed state.graph.links (structural, full-strength spring).
+  //     Extra/semantic links with different physics stay out of this registry.
+  //
+  // Register a source once at startup. Re-registering an existing id replaces it.
+
+  EP.GRAPH_SOURCES = [];
+
+  EP.registerGraphSource = function registerGraphSource(source) {
+    const idx = EP.GRAPH_SOURCES.findIndex((s) => s.id === source.id);
+    if (idx >= 0) {
+      EP.GRAPH_SOURCES[idx] = source;
+    } else {
+      EP.GRAPH_SOURCES.push(source);
+    }
+  };
+
+  EP.unregisterGraphSource = function unregisterGraphSource(id) {
+    EP.GRAPH_SOURCES = EP.GRAPH_SOURCES.filter((s) => s.id !== id);
+  };
+
+  // Merge all active sources into { nodesById, links }.
+  //
+  // ctx must contain:
+  //   existing  — current state.graph.nodesById (Map) for position preservation
+  //   world     — { w, h } for default initial scatter
+  //
+  // Merge rules:
+  //   - Node IDs are deduplicated: first source wins for position; later sources
+  //     enrich meta (Object.assign order).
+  //   - Links are concatenated; deduplication is the caller's responsibility if needed.
+  EP.mergeGraphSources = function mergeGraphSources(sources, ctx) {
+    const { existing, world } = ctx;
+    const cx = world.w * 0.5;
+    const cy = world.h * 0.5;
+
+    // Collect all node descriptors (id → merged descriptor)
+    const descriptors = new Map(); // id → { x?, y?, meta: {} }
+    const allLinks = [];
+
+    for (const source of sources) {
+      for (const descriptor of source.getNodes(ctx)) {
+        if (!descriptors.has(descriptor.id)) {
+          descriptors.set(descriptor.id, {
+            x: descriptor.x,
+            y: descriptor.y,
+            meta: {},
+          });
+        }
+        if (descriptor.meta) {
+          Object.assign(descriptors.get(descriptor.id).meta, descriptor.meta);
+        }
+      }
+      for (const link of source.getLinks(ctx)) {
+        allLinks.push(link);
+      }
+    }
+
+    // Build nodesById, preserving physics state from existing
+    const nodesById = new Map();
+    for (const [id, desc] of descriptors) {
+      const prev = existing.get(id);
+      const base = prev || {
+        id,
+        x: desc.x !== undefined ? desc.x : cx + (Math.random() - 0.5) * 900,
+        y: desc.y !== undefined ? desc.y : cy + (Math.random() - 0.5) * 700,
+        vx: 0,
+        vy: 0,
+      };
+      nodesById.set(id, { ...base, ...desc.meta, id });
+    }
+
+    return { nodesById, links: allLinks };
+  };
+
   // ── Backward-compatible wrapper ────────────────────────────────────────────
   // Kept so existing call-sites (tests, etc.) continue to work unchanged.
   EP.getBaseWorkingSetItems = function getBaseWorkingSetItems(state, getFilteredSortedItems) {
