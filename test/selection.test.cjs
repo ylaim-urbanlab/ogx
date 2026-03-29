@@ -820,6 +820,46 @@ section("42. getCardRenderer — returns null when no renderers registered");
   assert(renderer === null, "no renderers: getCardRenderer returns null");
 }
 
+// ── Node type registry tests ───────────────────────────────────────────────
+
+section("43. registerNodeType — file visible in files and hybrid, not folders");
+{
+  EP.registerNodeType("file", { visibleInModes: new Set(["files", "hybrid"]) });
+  assert(EP.isNodeTypeVisibleInMode("file", "files"),   "file visible in files mode");
+  assert(EP.isNodeTypeVisibleInMode("file", "hybrid"),  "file visible in hybrid mode");
+  assert(!EP.isNodeTypeVisibleInMode("file", "folders"),"file hidden in folders mode");
+}
+
+section("44. registerNodeType — folder visible in folders and hybrid, not files");
+{
+  EP.registerNodeType("folder", { visibleInModes: new Set(["folders", "hybrid"]) });
+  assert(EP.isNodeTypeVisibleInMode("folder", "folders"), "folder visible in folders mode");
+  assert(EP.isNodeTypeVisibleInMode("folder", "hybrid"),  "folder visible in hybrid mode");
+  assert(!EP.isNodeTypeVisibleInMode("folder", "files"),  "folder hidden in files mode");
+}
+
+section("45. isNodeTypeVisibleInMode — unknown type defaults to visible");
+{
+  assert(EP.isNodeTypeVisibleInMode("concept", "folders"), "unknown type: visible in folders");
+  assert(EP.isNodeTypeVisibleInMode("concept", "files"),   "unknown type: visible in files");
+  assert(EP.isNodeTypeVisibleInMode("concept", "hybrid"),  "unknown type: visible in hybrid");
+}
+
+section("46. registerNodeType — wildcard visibleInModes always visible");
+{
+  EP.registerNodeType("root-node", { visibleInModes: "*" });
+  assert(EP.isNodeTypeVisibleInMode("root-node", "folders"), "wildcard: visible in folders");
+  assert(EP.isNodeTypeVisibleInMode("root-node", "files"),   "wildcard: visible in files");
+  assert(EP.isNodeTypeVisibleInMode("root-node", "hybrid"),  "wildcard: visible in hybrid");
+  delete EP.NODE_TYPES["root-node"];
+}
+
+section("47. getNodeType — returns null for unregistered type");
+{
+  assert(EP.getNodeType("nonexistent") === null, "getNodeType: null for unknown type");
+  assert(EP.getNodeType("file") !== null, "getNodeType: descriptor returned for file");
+}
+
 // ── Summary ────────────────────────────────────────────────────────────────
 
 console.log(`\n${"─".repeat(50)}`);

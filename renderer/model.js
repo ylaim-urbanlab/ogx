@@ -202,6 +202,39 @@
     return { nodesById, links: allLinks };
   };
 
+  // ── Node type registry ────────────────────────────────────────────────────
+  // Declares how each node type behaves in the graph and reader.
+  //
+  // Required fields:
+  //   visibleInModes  — Set of view modes where this type is shown.
+  //                     Use "*" to mean "always visible regardless of mode".
+  //                     Current modes: "folders", "files", "hybrid".
+  //
+  // Optional fields (for future use, not enforced today):
+  //   virtual         — true if node has no backing file (e.g. concept nodes)
+  //   cardRenderer    — which card renderer to use (defaults to type name)
+  //
+  // Unknown types are treated as always visible (safe default).
+
+  EP.NODE_TYPES = {};
+
+  EP.registerNodeType = function registerNodeType(type, descriptor) {
+    EP.NODE_TYPES[type] = descriptor;
+  };
+
+  EP.getNodeType = function getNodeType(type) {
+    return EP.NODE_TYPES[type] || null;
+  };
+
+  // Returns true if a node of the given type should be visible in the given mode.
+  // Falls back to true for unknown types so unregistered types are never silently hidden.
+  EP.isNodeTypeVisibleInMode = function isNodeTypeVisibleInMode(type, mode) {
+    const descriptor = EP.NODE_TYPES[type];
+    if (!descriptor) return true; // unknown type: show by default
+    if (descriptor.visibleInModes === "*") return true;
+    return descriptor.visibleInModes.has(mode);
+  };
+
   // ── Card renderer registry ────────────────────────────────────────────────
   // Each renderer: (item, cardEl, rowIndex1) → job | null
   //

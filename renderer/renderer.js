@@ -1584,10 +1584,7 @@ function nodeIsVisible(id) {
     return true;
   }
   const item = findItemById(id);
-  if (state.view.mode === "folders" && item && item.type === "file") {
-    return false;
-  }
-  if (state.view.mode === "files" && item && item.type === "folder") {
+  if (item && !EP.isNodeTypeVisibleInMode(item.type, state.view.mode)) {
     return false;
   }
   if (state.view.visibleNodeIds.has(id)) {
@@ -3909,6 +3906,13 @@ els.terminalForm.addEventListener("submit", (event) => {
 window.addEventListener("resize", () => {
   resizeCanvas();
 });
+
+// ── Node type registration ─────────────────────────────────────────────────
+// visibleInModes controls which graph view modes show this node type.
+// Add new types here (e.g. "concept") without touching nodeIsVisible logic.
+
+EP.registerNodeType("file",    { visibleInModes: new Set(["files", "hybrid"]) });
+EP.registerNodeType("folder",  { visibleInModes: new Set(["folders", "hybrid"]) });
 
 // ── Card renderer registration ─────────────────────────────────────────────
 // Register additional types here when new node types are introduced.
