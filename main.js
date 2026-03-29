@@ -5,8 +5,44 @@ const { pathToFileURL, fileURLToPath } = require("node:url");
 
 const TAGS_FILE = ".ogx-tags.json";
 const CARDS_FILE = ".ogx-view-cards.json";
+const CONCEPTS_FILE = ".ogx-concepts.json";
 
 // Keep Chromium cache out of restricted synced folders (e.g. OneDrive).
+
+function envFlagEnabled(name) {
+  const raw = process.env[name];
+  if (raw == null) {
+    return false;
+  }
+  return !/^(0|false|no|off)$/i.test(String(raw).trim());
+}
+
+function hasArg(name) {
+  return process.argv.includes(name);
+}
+
+function configureGraphicsFallback() {
+  const forceGpu =
+    envFlagEnabled("OGX_ENABLE_GPU") ||
+    hasArg("--enable-gpu") ||
+    hasArg("--force-gpu");
+  const disableGpu =
+    !forceGpu && (
+      envFlagEnabled("OGX_DISABLE_GPU") ||
+      hasArg("--disable-gpu") ||
+      hasArg("--safe-gpu")
+    );
+
+  if (!disableGpu) {
+    return { gpuDisabled: false };
+  }
+
+  app.disableHardwareAcceleration();
+  app.commandLine.appendSwitch("disable-gpu-compositing");
+  return { gpuDisabled: true };
+}
+
+const graphicsMode = configureGraphicsFallback();
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -486,7 +522,9 @@ async function listItems(rootDir) {
       const fullPath = path.join(dir, entry.name);
       const relPath = path.relative(rootDir, fullPath);
       const type = entry.isDirectory() ? "folder" : "file";
-      items.push({ name: entry.name, relPath, type, fullPath });
+      let size = 0, mtimeMs = 0;
+      try { const st = await fs.stat(fullPath); size = st.size; mtimeMs = st.mtimeMs; } catch { /* skip */ }
+      items.push({ name: entry.name, relPath, type, fullPath, size, mtimeMs });
       if (items.length >= LIST_ITEMS_MAX) {
         limited = true;
         return;
@@ -563,6 +601,17 @@ ipcMain.handle("append-history", async (_event, rootDir, lines) => {
 ipcMain.handle("save-tags", async (_event, rootDir, tags) => {
   const tagsPath = path.join(rootDir, TAGS_FILE);
   await writeJson(tagsPath, tags);
+  return true;
+});
+
+ipcMain.handle("load-concepts", async (_event, rootDir) => {
+  const conceptsPath = path.join(rootDir, CONCEPTS_FILE);
+  return readJson(conceptsPath, { concepts: {}, edges: [] });
+});
+
+ipcMain.handle("save-concepts", async (_event, rootDir, data) => {
+  const conceptsPath = path.join(rootDir, CONCEPTS_FILE);
+  await writeJson(conceptsPath, data);
   return true;
 });
 
@@ -706,6 +755,26 @@ async function readFileSnippet(rootDir, fullPath, maxBytes) {
 
 ipcMain.handle("file-snippet", async (_event, rootDir, fullPath, maxBytes) => {
   return readFileSnippet(rootDir, fullPath, maxBytes);
+});
+
+// Batch-read text content for content-filter cache.
+// Returns Map-serialisable array: [[relPath, text], ...] for files that are readable text.
+// Binary files and read errors are silently skipped (no entry returned).
+ipcMain.handle("read-files-batch", async (_event, rootDir, relPaths) => {
+  const CONTENT_MAX = 512 * 1024; // 512 KB per file cap for content index
+  const results = [];
+  await Promise.all(
+    relPaths.map(async (rel) => {
+      const full = path.join(rootDir, rel);
+      try {
+        const sn = await readFileSnippet(rootDir, full, CONTENT_MAX);
+        if (sn.ok && typeof sn.text === "string") {
+          results.push([rel, sn.text]);
+        }
+      } catch { /* skip unreadable */ }
+    })
+  );
+  return results;
 });
 
 async function csvPreview(rootDir, fullPath) {
@@ -1194,6 +1263,9 @@ ipcMain.handle("browse-tab-parent", async (_e, { rootDir, dirPath }) => {
 app.whenReady().then(() => {
   const userDataDir = path.join(app.getPath("temp"), "OpenGraphXplorer-user-data");
   app.setPath("userData", userDataDir);
+  if (graphicsMode.gpuDisabled) {
+    console.warn("[OpenGraphXplorer] GPU acceleration disabled; using software rendering.");
+  }
   createWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {

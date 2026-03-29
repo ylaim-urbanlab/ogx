@@ -60,16 +60,26 @@ function section(name) {
 
 // A small synthetic filesystem mirroring the testenv structure
 const FS_ITEMS = [
-  { name: "billybob",            relPath: "billybob",                          type: "folder", fullPath: "/r/billybob" },
-  { name: "jeep_wrangler.txt",   relPath: "billybob/jeep_wrangler.txt",        type: "file",   fullPath: "/r/billybob/jeep_wrangler.txt" },
-  { name: "ford_f150.txt",       relPath: "billybob/ford_f150.txt",            type: "file",   fullPath: "/r/billybob/ford_f150.txt" },
-  { name: "chevrolet_silverado.txt", relPath: "billybob/chevrolet_silverado.txt", type: "file", fullPath: "/r/billybob/chevrolet_silverado.txt" },
-  { name: "henry",               relPath: "henry",                             type: "folder", fullPath: "/r/henry" },
-  { name: "honda_civic.txt",     relPath: "henry/honda_civic.txt",             type: "file",   fullPath: "/r/henry/honda_civic.txt" },
-  { name: "marshall",            relPath: "marshall",                          type: "folder", fullPath: "/r/marshall" },
-  { name: "subaru_outback.txt",  relPath: "marshall/subaru_outback.txt",       type: "file",   fullPath: "/r/marshall/subaru_outback.txt" },
-  { name: "toyota_rav4.txt",     relPath: "marshall/toyota_rav4.txt",          type: "file",   fullPath: "/r/marshall/toyota_rav4.txt" },
+  { name: "billybob",            relPath: "billybob",                          type: "folder", fullPath: "/r/billybob",                         size: 0 },
+  { name: "jeep_wrangler.txt",   relPath: "billybob/jeep_wrangler.txt",        type: "file",   fullPath: "/r/billybob/jeep_wrangler.txt",        size: 1024 },
+  { name: "ford_f150.txt",       relPath: "billybob/ford_f150.txt",            type: "file",   fullPath: "/r/billybob/ford_f150.txt",            size: 2048 },
+  { name: "chevrolet_silverado.txt", relPath: "billybob/chevrolet_silverado.txt", type: "file", fullPath: "/r/billybob/chevrolet_silverado.txt", size: 3 * 1024 * 1024 },
+  { name: "henry",               relPath: "henry",                             type: "folder", fullPath: "/r/henry",                             size: 0 },
+  { name: "honda_civic.txt",     relPath: "henry/honda_civic.txt",             type: "file",   fullPath: "/r/henry/honda_civic.txt",             size: 512 },
+  { name: "marshall",            relPath: "marshall",                          type: "folder", fullPath: "/r/marshall",                          size: 0 },
+  { name: "subaru_outback.txt",  relPath: "marshall/subaru_outback.txt",       type: "file",   fullPath: "/r/marshall/subaru_outback.txt",       size: 1536 },
+  { name: "toyota_rav4.txt",     relPath: "marshall/toyota_rav4.txt",          type: "file",   fullPath: "/r/marshall/toyota_rav4.txt",          size: 800 },
 ];
+
+// Simulated content cache for content-filter tests
+const CONTENT_CACHE = new Map([
+  ["billybob/jeep_wrangler.txt",       "Soft top zipper. Off-road trail vehicle."],
+  ["billybob/ford_f150.txt",           "Hauling tools. Tailgate latch sticks. No engine issues noted."],
+  ["billybob/chevrolet_silverado.txt", "Engine runs strong. Check engine light evap code."],
+  ["henry/honda_civic.txt",            "Daily commuter. No engine warning lights."],
+  ["marshall/subaru_outback.txt",      "Mountain drives. No warning lights."],
+  ["marshall/toyota_rav4.txt",         "Family road trips. Infotainment Bluetooth slow."],
+]);
 
 const ROOT_ID = "__root__";
 
@@ -142,47 +152,53 @@ function getWorkingSetItems(state, tagsByPath = {}) {
   return expanded.filter((i) => allowed.has(i.relPath));
 }
 
-// Simulate getWorkspaceRowsForDisplay (file-only, reader filter, pipeline result filter)
-function getWorkspaceRows(state, tagsByPath = {}, pipelineMatchByRel = new Map()) {
+// Simulate getWorkspaceRowsForDisplay (file-only, reader filter — no pipeline-result filtering)
+function getWorkspaceRows(state, tagsByPath = {}) {
   let rows = getWorkingSetItems(state, tagsByPath).filter((i) => i.type === "file");
   const f = (state.workspace.filterText || "").trim().toLowerCase();
   if (f) rows = rows.filter((i) => i.name.toLowerCase().includes(f) || i.relPath.toLowerCase().includes(f));
-
-  const pf = state.workspace.pipelineResultFilter;
-  const pipeActive = state.cardRender && state.cardRender.pipeline && state.cardRender.pipeline.length > 0;
-  if (pf && pipeActive) {
-    rows = rows.filter((i) => {
-      const k = normRel(i.relPath);
-      if (!pipelineMatchByRel.has(k)) return true;
-      const hit = pipelineMatchByRel.get(k);
-      return pf === "matched" ? hit : !hit;
-    });
-  }
   return rows;
 }
 
 function makeState(overrides = {}) {
   return {
+    extSelection: null,
+    wsExpansion: null,
+    cardRender: overrides.cardRender || { pipeline: [] },
+    ...overrides,
     view: {
-      searchText: "",
-      tagFilter: "",
+      filters: [],        // canonical filter list
+      searchText: "",     // legacy (kept for compat)
+      tagFilter: "",      // legacy (kept for compat)
       selectedId: ROOT_ID,
       mode: "folders",
       ...((overrides.view) || {}),
     },
-    extSelection: null,
-    wsExpansion: null,
-    workspace: {
-      filterText: "",
-      pipelineResultFilter: null,
-      ...((overrides.workspace) || {}),
-    },
-    cardRender: { pipeline: [] },
-    ...overrides,
-    view: { searchText: "", tagFilter: "", selectedId: ROOT_ID, mode: "folders", ...((overrides.view) || {}) },
-    workspace: { filterText: "", pipelineResultFilter: null, ...((overrides.workspace) || {}) },
-    cardRender: overrides.cardRender || { pipeline: [] },
+    workspace: { filterText: "", ...((overrides.workspace) || {}) },
   };
+}
+
+// Shared helpers for EP.buildWorkingSet (used across many sections)
+const TAGS = {};
+
+const PIPELINE_HELPERS = {
+  ROOT_ID,
+  normRel,
+  parentRelPath,
+  itemIdFromRelPath,
+  findItemByRelPath,
+  findItemById: findItemByRelPath,
+  getTagsForId: (relPath) => TAGS[relPath] || [],
+  getContentForRelPath: (relPath) => CONTENT_CACHE.get(relPath) ?? null,
+  getGraphNeighborIds: (id) => getNeighborIds(id, GRAPH_LINKS),
+};
+
+function buildWS(state, tagsOverride) {
+  const helpers = tagsOverride
+    ? { ...PIPELINE_HELPERS, getTagsForId: (r) => tagsOverride[r] || [] }
+    : PIPELINE_HELPERS;
+  const set = EP.buildWorkingSet(FS_ITEMS, state, helpers);
+  return FS_ITEMS.filter((i) => set.has(i.relPath));
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -315,96 +331,77 @@ section("10. Reader deck filter (filterText)");
   assert(rows[0].name === "ford_f150.txt", "reader filter 'ford': correct file");
 }
 
-section("11. Pipeline result filter — matched");
+section("11. Render pipeline does NOT filter deck (architecture invariant)");
 {
+  // card render grep does not remove cards from the deck — render ≠ filter.
+  // pipelineResultFilter was removed. All files remain visible regardless of render output.
   const state = makeState({
     cardRender: { pipeline: [{ op: "grep", pattern: "ford" }] },
-    workspace: { filterText: "", pipelineResultFilter: "matched" },
+    workspace: { filterText: "" },
   });
-  // Simulate: ford_f150 matched, others did not
-  const pipelineMatchByRel = new Map([
-    ["billybob/ford_f150.txt", true],
-    ["billybob/jeep_wrangler.txt", false],
-    ["billybob/chevrolet_silverado.txt", false],
-    ["henry/honda_civic.txt", false],
-    ["marshall/subaru_outback.txt", false],
-    ["marshall/toyota_rav4.txt", false],
-  ]);
-  const rows = getWorkspaceRows(state, {}, pipelineMatchByRel);
-  const names = rows.map((i) => i.name);
-  assert(names.includes("ford_f150.txt"), "matched filter: ford present");
-  assert(!names.includes("honda_civic.txt"), "matched filter: honda excluded");
-  assert(rows.length === 1, "matched filter: exactly 1 row");
+  const rows = getWorkspaceRows(state);
+  assert(rows.length === 6, "render pipeline active: all 6 files still in deck");
 }
 
-section("12. Pipeline result filter — empty (inverse)");
+section("12. To filter by content, use filter content — not render");
 {
+  // filter content is the correct mechanism; it uses the content cache, not render output.
   const state = makeState({
-    cardRender: { pipeline: [{ op: "grep", pattern: "ford" }] },
-    workspace: { filterText: "", pipelineResultFilter: "empty" },
+    view: { filters: [{ type: "content", value: "engine" }], selectedId: ROOT_ID },
   });
-  const pipelineMatchByRel = new Map([
-    ["billybob/ford_f150.txt", true],
-    ["billybob/jeep_wrangler.txt", false],
-    ["billybob/chevrolet_silverado.txt", false],
-    ["henry/honda_civic.txt", false],
-    ["marshall/subaru_outback.txt", false],
-    ["marshall/toyota_rav4.txt", false],
-  ]);
-  const rows = getWorkspaceRows(state, {}, pipelineMatchByRel);
-  const names = rows.map((i) => i.name);
-  assert(!names.includes("ford_f150.txt"), "empty filter: ford excluded (it matched)");
-  assert(names.includes("honda_civic.txt"), "empty filter: honda present (did not match)");
-  assert(rows.length === 5, "empty filter: 5 rows (the non-matchers)");
+  const ws = buildWS(state);
+  // CONTENT_CACHE has "engine" in chevrolet and honda entries
+  const names = ws.map((i) => i.name);
+  assert(names.includes("chevrolet_silverado.txt"), "content filter: chevrolet matches 'engine'");
+  assert(names.includes("honda_civic.txt"), "content filter: honda matches 'engine'");
+  assert(names.includes("ford_f150.txt"), "content filter: ford matches 'engine' (in 'No engine issues noted')");
+  assert(!names.includes("jeep_wrangler.txt"), "content filter: jeep excluded (no engine in content)");
+  assert(!names.includes("toyota_rav4.txt"), "content filter: toyota excluded (no engine in content)");
 }
 
-section("13. Pipeline result filter — all (off)");
+section("13. filter content degrades gracefully for items not in cache");
 {
-  const state = makeState({
-    cardRender: { pipeline: [{ op: "grep", pattern: "ford" }] },
-    workspace: { filterText: "", pipelineResultFilter: null },
-  });
-  const pipelineMatchByRel = new Map([
-    ["billybob/ford_f150.txt", true],
-    ["billybob/jeep_wrangler.txt", false],
+  // Items with no content cache entry are KEPT (not excluded) during cache warm-up.
+  const partialCache = new Map([
+    ["billybob/ford_f150.txt", "No engine issues noted."],
+    // chevrolet and others NOT in this partial cache
   ]);
-  const rows = getWorkspaceRows(state, {}, pipelineMatchByRel);
-  assert(rows.length === 6, "pipelineResultFilter=null: all 6 files shown");
+  const helpers = {
+    ...PIPELINE_HELPERS,
+    getContentForRelPath: (rel) => partialCache.get(rel) ?? null,
+  };
+  const state = makeState({
+    view: { filters: [{ type: "content", value: "engine" }], selectedId: ROOT_ID },
+  });
+  const set = EP.buildWorkingSet(FS_ITEMS, state, helpers);
+  const ws = FS_ITEMS.filter((i) => set.has(i.relPath));
+  // ford is in cache and matches; all others are not in cache → kept (graceful degrade)
+  assert(ws.some((i) => i.name === "ford_f150.txt"), "partial cache: ford (cached match) included");
+  assert(ws.some((i) => i.name === "jeep_wrangler.txt"), "partial cache: jeep (not cached) kept");
+  assert(ws.some((i) => i.name === "honda_civic.txt"), "partial cache: honda (not cached) kept");
 }
 
-section("14. Tag + pipeline result filter composing (the reported bug case)");
+section("14. filter content + tag compose correctly");
 {
-  // User has render grep 'Condition: Very' → matched, then wants to tag those files
-  // The visible reader rows should be the matched subset; tag should apply to those
+  // content filter narrows to files mentioning 'engine'; tag adds a separate condition
+  const tags = { "billybob/chevrolet_silverado.txt": ["workhorse"] };
   const state = makeState({
-    cardRender: { pipeline: [{ op: "grep", pattern: "Condition: Very" }] },
-    workspace: { filterText: "", pipelineResultFilter: "matched" },
+    view: {
+      filters: [
+        { type: "content", value: "engine" },
+        { type: "tag", value: "workhorse" },
+      ],
+      selectedId: ROOT_ID,
+    },
   });
-  const pipelineMatchByRel = new Map([
-    ["henry/honda_civic.txt", true],
-    ["marshall/subaru_outback.txt", true],
-    ["billybob/ford_f150.txt", false],
-    ["billybob/jeep_wrangler.txt", false],
-    ["billybob/chevrolet_silverado.txt", false],
-    ["marshall/toyota_rav4.txt", false],
-  ]);
-  const visibleRows = getWorkspaceRows(state, {}, pipelineMatchByRel);
-  assert(visibleRows.length === 2, "visible reader rows = 2 (matched)");
-  const names = visibleRows.map((i) => i.name);
-  assert(names.includes("honda_civic.txt"), "honda_civic visible");
-  assert(names.includes("subaru_outback.txt"), "subaru_outback visible");
-
-  // Simulate: tag "condition:verygood" applied to visibleRows (what the fixed tag command now does)
-  const tagsByPath = {};
-  for (const item of visibleRows) {
-    const ex = new Set((tagsByPath[item.relPath] || []));
-    ex.add("condition:verygood");
-    tagsByPath[item.relPath] = [...ex];
-  }
-  assert(tagsByPath["henry/honda_civic.txt"] !== undefined, "honda tagged");
-  assert(tagsByPath["marshall/subaru_outback.txt"] !== undefined, "subaru tagged");
-  assert(tagsByPath["billybob/ford_f150.txt"] === undefined, "ford NOT tagged (not visible)");
-  assert(tagsByPath["marshall/toyota_rav4.txt"] === undefined, "toyota NOT tagged");
+  const ws = buildWS(state, tags);
+  const names = ws.map((i) => i.name);
+  // Must match both: content contains 'engine' AND tagged 'workhorse'
+  // chevrolet: engine in content ✓, workhorse tag ✓ → included
+  // honda: engine in content ✓, no workhorse tag ✗ → excluded
+  assert(names.includes("chevrolet_silverado.txt"), "content+tag: chevrolet matches both");
+  assert(!names.includes("honda_civic.txt"), "content+tag: honda excluded (no workhorse tag)");
+  assert(!names.includes("ford_f150.txt"), "content+tag: ford excluded (no engine in content)");
 }
 
 section("15. select clear resets selectedId to ROOT_ID");
@@ -500,28 +497,6 @@ section("21. Pipeline apply: grep + head");
 
 // ── Filter pipeline tests ──────────────────────────────────────────────────
 
-// Shared helpers for buildWorkingSet
-const PIPELINE_HELPERS = {
-  ROOT_ID,
-  normRel,
-  parentRelPath,
-  itemIdFromRelPath,
-  findItemByRelPath,
-  findItemById: findItemByRelPath,
-  getTagsForId: (relPath) => TAGS[relPath] || [],
-  getGraphNeighborIds: (id) => getNeighborIds(id, GRAPH_LINKS),
-};
-
-const TAGS = {};
-
-function buildWS(state, tagsOverride) {
-  const helpers = tagsOverride
-    ? { ...PIPELINE_HELPERS, getTagsForId: (r) => tagsOverride[r] || [] }
-    : PIPELINE_HELPERS;
-  const set = EP.buildWorkingSet(FS_ITEMS, state, helpers);
-  return FS_ITEMS.filter((i) => set.has(i.relPath));
-}
-
 section("22. applyPreFilters — text handler");
 {
   const filtered = EP.applyPreFilters(FS_ITEMS, [{ type: "text", value: "ford" }], {});
@@ -563,16 +538,33 @@ section("25. applyPreFilters — chained text + ext");
   assert(filtered.length === 3, "chained text+ext: 3 results");
 }
 
-section("26. buildPreFilters — derives from state");
+section("26. buildPreFilters — canonical filters[] takes precedence over legacy fields");
 {
-  const state = makeState({
+  // New path: reads from state.view.filters[]
+  const stateNew = makeState({
+    view: {
+      filters: [{ type: "name", value: "ford" }, { type: "ext", value: "txt" }],
+      searchText: "ignored", // legacy field present but ignored when canonical filter covers same type
+      selectedId: ROOT_ID,
+    },
+  });
+  const filtersNew = EP.buildPreFilters(stateNew);
+  assert(filtersNew.some((f) => f.type === "name" && f.value === "ford"), "canonical: name filter present");
+  assert(filtersNew.some((f) => f.type === "ext" && f.value === "txt"), "canonical: ext filter present");
+  // searchText 'ignored' should NOT produce a duplicate name/text filter
+  const nameCount = filtersNew.filter((f) => f.type === "name" || f.type === "text").length;
+  assert(nameCount === 1, "canonical: no duplicate from legacy searchText when name filter active");
+
+  // Legacy path: no filters[] → falls back to legacy state fields
+  const stateLegacy = makeState({
     view: { searchText: "ford", tagFilter: "", selectedId: ROOT_ID },
     extSelection: { ext: "txt", folderIds: new Set() },
   });
-  const filters = EP.buildPreFilters(state);
-  assert(filters.some((f) => f.type === "text" && f.value === "ford"), "buildPreFilters: text filter present");
-  assert(filters.some((f) => f.type === "ext" && f.value === "txt"), "buildPreFilters: ext filter present");
-  assert(filters.length === 2, "buildPreFilters: exactly 2 filters (text + ext)");
+  const filtersLegacy = EP.buildPreFilters(stateLegacy);
+  assert(filtersLegacy.some((f) => (f.type === "text" || f.type === "name") && f.value === "ford"),
+    "legacy: text/name filter derived from searchText");
+  assert(filtersLegacy.some((f) => f.type === "ext" && f.value === "txt"),
+    "legacy: ext filter derived from extSelection");
 }
 
 section("27. buildWorkingSet — no filters, returns all items");
@@ -858,6 +850,106 @@ section("47. getNodeType — returns null for unregistered type");
 {
   assert(EP.getNodeType("nonexistent") === null, "getNodeType: null for unknown type");
   assert(EP.getNodeType("file") !== null, "getNodeType: descriptor returned for file");
+}
+
+// ── New filter type tests ──────────────────────────────────────────────────
+
+section("48. applyPreFilters — name handler (canonical type)");
+{
+  const filtered = EP.applyPreFilters(FS_ITEMS, [{ type: "name", value: "ford" }], {});
+  assert(filtered.every((i) => i.name.includes("ford") || i.relPath.includes("ford")),
+    "name filter: all results contain 'ford'");
+  assert(filtered.length === 1, "name filter: exactly 1 match (ford_f150.txt)");
+}
+
+section("49. applyPreFilters — content handler");
+{
+  const helpers = { getContentForRelPath: (r) => CONTENT_CACHE.get(r) ?? null };
+  const filtered = EP.applyPreFilters(FS_ITEMS, [{ type: "content", value: "engine" }], helpers);
+  const names = filtered.map((i) => i.name);
+  // CONTENT_CACHE: chevrolet has "Engine runs strong" and "Check engine light"
+  // honda has "No engine warning lights"
+  // ford has "No engine issues noted"
+  assert(names.includes("chevrolet_silverado.txt"), "content filter: chevrolet matches 'engine'");
+  assert(names.includes("honda_civic.txt"), "content filter: honda matches 'engine'");
+  assert(names.includes("ford_f150.txt"), "content filter: ford matches 'engine'");
+  assert(!names.includes("jeep_wrangler.txt"), "content filter: jeep excluded (no engine in content)");
+  assert(!names.includes("subaru_outback.txt"), "content filter: subaru excluded");
+}
+
+section("50. applyPreFilters — body is alias for content");
+{
+  const helpers = { getContentForRelPath: (r) => CONTENT_CACHE.get(r) ?? null };
+  const byContent = EP.applyPreFilters(FS_ITEMS, [{ type: "content", value: "engine" }], helpers);
+  const byBody    = EP.applyPreFilters(FS_ITEMS, [{ type: "body",    value: "engine" }], helpers);
+  assert(byContent.length === byBody.length, "body alias: same result count as content");
+  assert(byContent.map((i) => i.relPath).sort().join() === byBody.map((i) => i.relPath).sort().join(),
+    "body alias: identical item sets");
+}
+
+section("51. applyPreFilters — meta size filter");
+{
+  // chevrolet_silverado.txt has size: 3MB; others are ≤ 2KB
+  const bigOnly = EP.applyPreFilters(FS_ITEMS, [{ type: "meta", value: "size>2mb" }], {});
+  assert(bigOnly.some((i) => i.name === "chevrolet_silverado.txt"),
+    "meta size>2mb: chevrolet (3MB) included");
+  assert(!bigOnly.some((i) => i.name === "ford_f150.txt"),
+    "meta size>2mb: ford (2KB) excluded");
+
+  const smallOnly = EP.applyPreFilters(FS_ITEMS, [{ type: "meta", value: "size<1kb" }], {});
+  assert(smallOnly.some((i) => i.name === "honda_civic.txt"),
+    "meta size<1kb: honda (512B) included");
+  assert(!smallOnly.some((i) => i.name === "chevrolet_silverado.txt"),
+    "meta size<1kb: chevrolet (3MB) excluded");
+}
+
+section("52. applyPreFilters — meta type filter");
+{
+  const filesOnly   = EP.applyPreFilters(FS_ITEMS, [{ type: "meta", value: "type:file" }], {});
+  const foldersOnly = EP.applyPreFilters(FS_ITEMS, [{ type: "meta", value: "type:folder" }], {});
+  assert(filesOnly.every((i) => i.type === "file"), "meta type:file: only files");
+  assert(filesOnly.length === 6, "meta type:file: 6 files");
+  assert(foldersOnly.every((i) => i.type === "folder"), "meta type:folder: only folders");
+  assert(foldersOnly.length === 3, "meta type:folder: 3 folders");
+}
+
+section("53. buildPreFilters — state.view.filters[] drives filter list");
+{
+  const state = makeState({
+    view: {
+      filters: [
+        { type: "name", value: "billybob" },
+        { type: "meta", value: "type:file" },
+      ],
+      selectedId: ROOT_ID,
+    },
+  });
+  const filters = EP.buildPreFilters(state);
+  assert(filters.length >= 2, "filters[] → at least 2 filters");
+  assert(filters.some((f) => f.type === "name"), "filters[]: name filter present");
+  assert(filters.some((f) => f.type === "meta"), "filters[]: meta filter present");
+}
+
+section("54. buildWorkingSet — filter name via filters[]");
+{
+  const state = makeState({
+    view: { filters: [{ type: "name", value: "ford" }], selectedId: ROOT_ID },
+  });
+  const ws = buildWS(state);
+  assert(ws.length === 1, "buildWorkingSet with name filter: 1 result");
+  assert(ws[0].name === "ford_f150.txt", "buildWorkingSet with name filter: correct item");
+}
+
+section("55. buildWorkingSet — filter content via filters[]");
+{
+  const state = makeState({
+    view: { filters: [{ type: "content", value: "trail" }], selectedId: ROOT_ID },
+  });
+  const ws = buildWS(state);
+  const names = ws.map((i) => i.name);
+  // CONTENT_CACHE: jeep has "Off-road trail vehicle"
+  assert(names.includes("jeep_wrangler.txt"), "content filter 'trail': jeep included");
+  assert(!names.includes("ford_f150.txt"), "content filter 'trail': ford excluded");
 }
 
 // ── Summary ────────────────────────────────────────────────────────────────

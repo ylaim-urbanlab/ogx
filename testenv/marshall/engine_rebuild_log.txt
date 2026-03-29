@@ -1,0 +1,20 @@
+Engine Rebuild Log — 2009 Subaru EJ257 (2.5L Boxer Turbo)
+Date started: 2024-08-12
+Date completed: 2024-10-03
+
+Work performed:
+- Bored cylinders to 0.020 oversize
+- New forged pistons installed
+- Head gaskets (MLS) replaced on both banks
+- Valve stem seals replaced
+- Oil pump replaced
+- New rod bearings and main bearings
+- Throttle body cleaned
+- Intake and exhaust manifolds cleaned and re-torqued
+
+Issues found:
+- Cylinder 4 showed scoring, required more aggressive bore
+- Original head bolts re-used (torque verified in spec)
+
+Next service: Check for leaks at 1,000 miles, re-torque head bolts (if TTY, skip)
+Notes: Engine dyno'd at 310 whp on stock turbo after break-in.

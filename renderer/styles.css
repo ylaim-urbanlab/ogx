@@ -368,6 +368,99 @@ body {
   min-height: 0;
 }
 
+/* ── Active State Panel ───────────────────────────────────────────────────── */
+.active-state-panel {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 4;
+  min-width: 180px;
+  max-width: 280px;
+  background: var(--terminal-bg);
+  border: 1px solid var(--terminal-edge);
+  border-radius: 10px;
+  padding: 10px 12px;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--chalk-dim);
+  pointer-events: auto;
+  user-select: none;
+}
+
+.asp-section {
+  margin-bottom: 6px;
+}
+.asp-section:last-child {
+  margin-bottom: 0;
+}
+
+.asp-section--footer {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.asp-label {
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.28);
+  margin-bottom: 2px;
+}
+
+.asp-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.asp-chip {
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--chalk);
+  cursor: pointer;
+  line-height: 1.4;
+  transition: background 0.1s;
+}
+.asp-chip:hover {
+  background: rgba(255, 255, 255, 0.13);
+}
+.asp-chip--negate {
+  color: #f9b4c8;
+  border-color: rgba(249, 180, 200, 0.3);
+}
+.asp-chip--remove::after {
+  content: " ×";
+  opacity: 0.55;
+}
+
+.asp-metric-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.asp-metric-label {
+  color: var(--chalk-dim);
+}
+
+.asp-metric-value {
+  min-width: 2ch;
+  text-align: right;
+  color: var(--chalk);
+  font-variant-numeric: tabular-nums;
+}
+
 .canvas-command {
   position: absolute;
   left: 12px;

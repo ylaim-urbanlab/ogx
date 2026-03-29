@@ -1,0 +1,12 @@
+Vehicle: 2021 Harley-Davidson Street Glide Special
+Nickname: Iron Mule
+Odometer: 18,340 miles
+Condition: Good condition. Some road rash on lower right fairing from a slow tip-over in a parking lot. Engine runs strong.
+Recent Service:
+- Oil and primary chain case fluid changed at 17,500 miles
+- Air filter cleaned and re-oiled at 16,000 miles
+- Brake pads inspected, front at 60%, rear at 45%
+Known Issues:
+- Fairing scratch on lower right panel, cosmetic only
+- Clutch lever slightly stiff in cold weather
+Notes: Weekend and highway cruiser. Mostly long-distance runs. Loud aftermarket exhaust (Vance & Hines).

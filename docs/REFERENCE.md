@@ -35,6 +35,8 @@ There is **no global index**: previews and pipelines run over the current workin
 
 User/chromium profile data is directed under the system temp path (see `main.js`) so the app avoids writing cache into synced folders.
 
+If Chromium prints repeated GPU staging-buffer / `SharedImage` failures on launch, run `pnpm start:safe` (or set `OGX_DISABLE_GPU=1`) to disable hardware acceleration for that session.
+
 ---
 
 ## Mental model

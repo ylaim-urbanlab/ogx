@@ -15,6 +15,8 @@ const DEFAULT_SETTINGS = {
   selectionHudPosition: "bottom",
   /** "top" | "bottom" — CLI input bar on the graph */
   cliInputAnchor: "bottom",
+  /** click cycle order for graph nodes: "self" | "children" | "parents" */
+  clickCycle: ["self", "children", "parents"],
 };
 
 function loadSettings() {
@@ -60,11 +62,16 @@ const state = {
   readerPipelineMatchByRel: new Map(),
   extraLinks: [],
   extraLinkEndpoints: new Set(), // relPaths of nodes that have ≥1 extra link
+  concepts: {},        // { [name]: {} } — runtime only until concept save
+  conceptEdges: [],    // [{ from, to, type }] — directional typed edges
   highlight: null,
   extSelection: null,
   wsExpansion: null,
   selection: { relPath: null },
   cardRender: { pipeline: [] },
+  // Click cycle: tracks which node was last clicked and how many times,
+  // so repeated clicks on the same node cycle through expansion modes.
+  clickCycle: { nodeId: null, step: 0 },
   fsSnapshot: {
     items: [],
     itemsById: new Map(),
@@ -84,6 +91,9 @@ const state = {
     pipelineResultFilter: null,
   },
   view: {
+    // Canonical filter list — all new filter commands write here.
+    // Legacy fields (searchText, tagFilter) kept for undo/bookmark compat only.
+    filters: [],
     searchText: "",
     tagFilter: "",
     sortMode: "name-asc",
@@ -92,6 +102,10 @@ const state = {
     visibleNodeIds: new Set(),
     labelFields: new Set(),
   },
+  // Content cache: relPath → string.  Populated async after root load.
+  // Filters read synchronously; if entry absent → item is kept (graceful degrade).
+  contentCache: new Map(),
+  contentCacheReady: false,
   graph: {
     nodesById: new Map(),
     links: [],
@@ -122,6 +136,7 @@ const els = {
   appTabStrip: document.getElementById("appTabStrip"),
   workspaceStage: document.getElementById("workspaceStage"),
   browseMount: document.getElementById("browseMount"),
+  activeStatePanel: document.getElementById("activeStatePanel"),
 };
 
 const EP = window.EP;
@@ -276,10 +291,17 @@ function sortItems(items) {
   return sorted;
 }
 
+function filterHelpers() {
+  return {
+    getTagsForId,
+    getContentForRelPath: (rel) => state.contentCache.get(rel) ?? null,
+  };
+}
+
 function filterItems(items) {
-  // text + tag only (no ext) — used for graph visibility and allowed-set derivation
+  // text + tag + content only (no ext) — used for graph visibility and allowed-set derivation
   const filters = EP.buildPreFilters(state).filter((f) => f.type !== "ext");
-  return EP.applyPreFilters(items, filters, { getTagsForId });
+  return EP.applyPreFilters(items, filters, filterHelpers());
 }
 
 function pruneStaleTags() {
@@ -301,7 +323,7 @@ function getWorkingSetItems() {
   }
   const workingSet = EP.buildWorkingSet(state.fsSnapshot.items, state, {
     ROOT_ID,
-    getTagsForId,
+    ...filterHelpers(),
     normRel,
     parentRelPath,
     itemIdFromRelPath,
@@ -472,33 +494,141 @@ function updateSelectionHud() {
           })
           .join(" | ")
       : "(default card previews)";
-  const focusRel = state.selection.relPath || state.workspace.selectedCardRelPath;
-  const focus = focusRel ? focusRel.split("/").pop() : "all reader cards";
-  const pf = state.workspace.pipelineResultFilter;
-  const ext = state.extSelection ? `ext=.${state.extSelection.ext}` : "ext=off";
-  const anchorItem = state.view.selectedId !== ROOT_ID ? findItemById(state.view.selectedId) : null;
-  const expandAnchor = state.wsExpansion
-    ? anchorItem
-      ? `node: ${anchorItem.name}`
-      : "root (expand from full working set)"
-    : "—";
-  const pipeActive = steps.length > 0;
-  const graphPipeHint =
-    pipeActive && (pf === "matched" || pf === "empty")
-      ? "Graph: teal = in reader · dim = not in reader · light ring = pipeline preview pending"
-      : "";
-  const hudLines = [
-    `Pipeline: ${pipe}`,
-    `Render scope: ${focus}`,
-    `Pipeline result: ${pf || "off"} (reader matched | empty | all)`,
-    ext,
-    `expand: ${state.wsExpansion || "none"} · anchor ${expandAnchor}`,
-    `undo / redo: ${state.cliUndoStack.length} / ${state.cliRedoStack.length} — back (4) · forward (6)`,
-  ];
-  if (graphPipeHint) {
-    hudLines.splice(3, 0, graphPipeHint);
+  const hudLines = [];
+  if (steps.length > 0) {
+    const scopeRel = state.selection.relPath || state.workspace.selectedCardRelPath;
+    const scopeName = scopeRel ? scopeRel.split("/").pop() : "all";
+    hudLines.push(`render: ${pipe}  (scope: ${scopeName})`);
   }
+  hudLines.push(`back (4) · forward (6)  ·  undo ${state.cliUndoStack.length} · redo ${state.cliRedoStack.length}`);
   els.selectionHud.textContent = hudLines.join("\n");
+}
+
+function renderActiveStatePanel() {
+  const panel = els.activeStatePanel;
+  if (!panel) return;
+
+  const filters = state.view.filters || [];
+  const selectedId = state.view.selectedId;
+  const mode = state.view.mode || "folders";
+  const expansion = state.wsExpansion || null;
+  const hasContent = !!state.rootDir;
+  const matchedItems = getWorkingSetItems();
+  const folderMatches = matchedItems.filter((item) => item.type === "folder").length;
+  const fileMatches = matchedItems.filter((item) => item.type === "file").length;
+  const totalMatches = matchedItems.length;
+
+  // Hide panel when nothing loaded
+  if (!hasContent) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+  panel.innerHTML = "";
+
+  function section(label) {
+    const wrap = document.createElement("div");
+    wrap.className = "asp-section";
+    const lbl = document.createElement("div");
+    lbl.className = "asp-label";
+    lbl.textContent = label;
+    wrap.appendChild(lbl);
+    return wrap;
+  }
+
+  // ── Selection ──────────────────────────────────────────────────────────────
+  const selSec = section("selection");
+  const selRow = document.createElement("div");
+  selRow.className = "asp-row";
+
+  const selItem = selectedId ? findItemById(selectedId) : null;
+  const selLabel = selectedId === ROOT_ID
+    ? "root"
+    : selItem
+      ? `${selItem.name}`
+      : (selectedId || "—");
+
+  const selChip = document.createElement("button");
+  selChip.type = "button";
+  selChip.className = "asp-chip";
+  selChip.textContent = selLabel;
+  selChip.title = selectedId ? `select node ${selectedId}` : "";
+  if (selectedId && selectedId !== ROOT_ID) {
+    selChip.addEventListener("click", () => dispatchCommand(`select node ${selectedId}`));
+  }
+  selRow.appendChild(selChip);
+
+  if (expansion) {
+    const expChip = document.createElement("button");
+    expChip.type = "button";
+    expChip.className = "asp-chip asp-chip--remove";
+    expChip.textContent = expansion;
+    expChip.title = "expand clear";
+    expChip.addEventListener("click", () => dispatchCommand("expand clear"));
+    selRow.appendChild(expChip);
+  }
+  selSec.appendChild(selRow);
+  panel.appendChild(selSec);
+
+  // ── Mode ───────────────────────────────────────────────────────────────────
+  const modeSec = section("mode");
+  const modeRow = document.createElement("div");
+  modeRow.className = "asp-row";
+  const modeChip = document.createElement("button");
+  const modeCycle = { folders: "files", files: "hybrid", hybrid: "folders" };
+  const nextMode = modeCycle[mode] || "folders";
+  modeChip.type = "button";
+  modeChip.className = "asp-chip";
+  modeChip.textContent = mode;
+  modeChip.title = `mode ${nextMode}`;
+  modeChip.addEventListener("click", () => dispatchCommand(`mode ${nextMode}`));
+  modeRow.appendChild(modeChip);
+  modeSec.appendChild(modeRow);
+  panel.appendChild(modeSec);
+
+  // ── Filters ────────────────────────────────────────────────────────────────
+  if (filters.length > 0) {
+    const filtSec = section("filters");
+    for (const f of filters) {
+      const row = document.createElement("div");
+      row.className = "asp-row";
+      const chip = document.createElement("button");
+      chip.type = "button";
+      const pinMark = f.pinned ? "+" : "";
+      chip.className = "asp-chip asp-chip--remove" + (f.negate ? " asp-chip--negate" : "");
+      chip.textContent = `${pinMark}${f.type} ${f.negate ? "NOT " : ""}${f.value || ""}`;
+      chip.title = `remove: -filter ${f.type} ${f.negate ? "-" : ""}${f.value || ""}`;
+      chip.addEventListener("click", () => {
+        dispatchCommand(`-filter ${f.type} ${f.negate ? "-" : ""}${f.value || ""}`);
+      });
+      row.appendChild(chip);
+      filtSec.appendChild(row);
+    }
+    panel.appendChild(filtSec);
+  }
+
+  // ── Matches ────────────────────────────────────────────────────────────────
+  const matchesSec = section("matches");
+  matchesSec.classList.add("asp-section--footer");
+  const counts = [
+    ["folders", folderMatches],
+    ["files", fileMatches],
+    ["total", totalMatches],
+  ];
+  counts.forEach(([label, value]) => {
+    const row = document.createElement("div");
+    row.className = "asp-metric-row";
+    const labelEl = document.createElement("span");
+    labelEl.className = "asp-metric-label";
+    labelEl.textContent = label;
+    const valueEl = document.createElement("span");
+    valueEl.className = "asp-metric-value";
+    valueEl.textContent = String(value);
+    row.appendChild(labelEl);
+    row.appendChild(valueEl);
+    matchesSec.appendChild(row);
+  });
+  panel.appendChild(matchesSec);
 }
 
 function renderTagBar() {
@@ -518,10 +648,11 @@ function renderTagBar() {
     chip.title = `Filter by tag: ${tag}`;
     chip.addEventListener("click", () => {
       const isActive = state.view.tagFilter === tag.toLowerCase();
-      state.view.tagFilter = isActive ? "" : tag.toLowerCase();
-      buildGraph();
-      renderWorkspaceDeck();
-      renderTagBar();
+      if (isActive) {
+        dispatchCommand("filter clear");
+      } else {
+        dispatchCommand(`filter tag ${tag.toLowerCase()}`);
+      }
     });
     els.tagBar.appendChild(chip);
   }
@@ -863,58 +994,18 @@ function getBaseReaderRowsForDisplay() {
 }
 
 function getWorkspaceRowsForDisplay() {
-  const base = getBaseReaderRowsForDisplay();
-  const pf = state.workspace.pipelineResultFilter;
-  const pipeActive = state.cardRender.pipeline && state.cardRender.pipeline.length > 0;
-  if (!pf || !pipeActive) {
-    return base;
-  }
-  const map = state.readerPipelineMatchByRel;
-  return base.filter((i) => {
-    const k = normRel(i.relPath);
-    if (!map.has(k)) {
-      return true;
-    }
-    const hit = map.get(k);
-    if (pf === "matched") {
-      return hit;
-    }
-    if (pf === "empty") {
-      return !hit;
-    }
-    return true;
-  });
+  // Render output must NEVER influence deck membership.
+  // pipelineResultFilter is kept in state for undo compat but is no longer acted on here.
+  return getBaseReaderRowsForDisplay();
 }
 
 function applyPipelineResultFilterToDeck() {
-  if (!els.workspaceDeck) {
-    return;
-  }
-  const pf = state.workspace.pipelineResultFilter;
-  const pipeActive = state.cardRender.pipeline && state.cardRender.pipeline.length > 0;
-  if (!pf || !pipeActive) {
-    for (const c of els.workspaceDeck.querySelectorAll(".file-card")) {
+  // Previously used pipeline output to hide cards. Removed: render ≠ filter.
+  // Cards are never hidden here; deck membership is controlled solely by filters.
+  if (els.workspaceDeck) {
+    for (const c of els.workspaceDeck.querySelectorAll(".file-card--pf-hidden")) {
       c.classList.remove("file-card--pf-hidden");
     }
-    return;
-  }
-  const map = state.readerPipelineMatchByRel;
-  for (const card of els.workspaceDeck.querySelectorAll(".file-card")) {
-    const rp = card.dataset.relPath;
-    if (!rp) {
-      continue;
-    }
-    const k = normRel(rp);
-    let show = true;
-    if (map.has(k)) {
-      const hit = map.get(k);
-      if (pf === "matched") {
-        show = hit;
-      } else if (pf === "empty") {
-        show = !hit;
-      }
-    }
-    card.classList.toggle("file-card--pf-hidden", !show);
   }
 }
 
@@ -1032,6 +1123,14 @@ function isHighlightId(id) {
   return false;
 }
 
+function getWorkingSetGraphIds() {
+  const ids = new Set();
+  for (const item of getWorkingSetItems()) {
+    ids.add(item.relPath);
+  }
+  return ids;
+}
+
 function isGraphFocusNode(id) {
   if (state.highlight) {
     const h = state.highlight;
@@ -1040,11 +1139,15 @@ function isGraphFocusNode(id) {
   if (state.extSelection) {
     return id === ROOT_ID || state.extSelection.folderIds.has(id);
   }
+  if (state.view.selectedId && state.view.selectedId !== ROOT_ID) {
+    const focusIds = getWorkingSetGraphIds();
+    return id === state.view.selectedId || focusIds.has(id);
+  }
   return true;
 }
 
 function graphDimActive() {
-  return Boolean(state.highlight || state.extSelection);
+  return Boolean(state.highlight || state.extSelection || (state.view.selectedId && state.view.selectedId !== ROOT_ID));
 }
 
 /** When reader matched/empty + card render: tint file nodes by pipeline hit vs current reader filter. */
@@ -1460,7 +1563,7 @@ function buildFileCard(item, card, rowIndex1) {
   card.appendChild(row);
 
   body.addEventListener("click", () => {
-    selectCardInDeck(relPath);
+    dispatchCommand(`select card "${relPath}"`);
   });
 
   if (!state.rootDir) return null;
@@ -1502,6 +1605,7 @@ function renderWorkspaceDeck() {
       "No files in the reader. Widen the working set (clear filters / select ext / expand) or load a root with matching files.";
     els.workspaceDeck.appendChild(empty);
     updateWsBar();
+    renderActiveStatePanel();
     return;
   }
 
@@ -1532,6 +1636,7 @@ function renderWorkspaceDeck() {
 
   updateWsBar();
   applyPipelineResultFilterToDeck();
+  renderActiveStatePanel();
 
   if (deckJobs.length && state.rootDir) {
     scheduleAfterFrame(() => {
@@ -1557,6 +1662,7 @@ function buildGraph() {
   const { nodesById, links } = EP.mergeGraphSources(EP.GRAPH_SOURCES, ctx);
   state.graph.nodesById = nodesById;
   state.graph.links = links;
+  renderActiveStatePanel();
 }
 
 function resizeCanvas() {
@@ -1568,6 +1674,10 @@ function resizeCanvas() {
 }
 
 function nodeIsVisible(id) {
+  // Concept nodes are always visible when they exist
+  if (id && id.startsWith("concept:")) {
+    return true;
+  }
   if (isHighlightId(id)) {
     return true;
   }
@@ -1629,6 +1739,34 @@ function drawGraph() {
   ctx.translate(cssW * 0.5, cssH * 0.5);
   ctx.scale(cam.scale, cam.scale);
   ctx.translate(-cam.x, -cam.y);
+  const dim = graphDimActive();
+
+  // Concept edges — drawn before tree links, solid with type label at midpoint
+  if (state.conceptEdges.length > 0) {
+    ctx.save();
+    ctx.lineWidth = 1.8 / cam.scale;
+    ctx.font = `${10 / cam.scale}px Segoe UI, system-ui, sans-serif`;
+    for (const edge of state.conceptEdges) {
+      const na = state.graph.nodesById.get(edge.from);
+      const nb = state.graph.nodesById.get(edge.to);
+      if (!na || !nb) continue;
+      if (!nodeIsVisible(edge.from) && !nodeIsVisible(edge.to)) continue;
+      const alpha = dim ? 0.18 : 0.45;
+      ctx.strokeStyle = `rgba(255,210,100,${alpha})`;
+      ctx.beginPath();
+      ctx.moveTo(na.x, na.y);
+      ctx.lineTo(nb.x, nb.y);
+      ctx.stroke();
+      // Type label at midpoint
+      if (edge.type && cam.scale > 0.55) {
+        const mx = (na.x + nb.x) * 0.5;
+        const my = (na.y + nb.y) * 0.5;
+        ctx.fillStyle = `rgba(255,210,100,${alpha * 0.9})`;
+        ctx.fillText(edge.type, mx + 3 / cam.scale, my - 3 / cam.scale);
+      }
+    }
+    ctx.restore();
+  }
 
   // Extra (non-tree) links drawn first so tree links render on top
   const EXTRA_LINK_RGBA = {
@@ -1659,7 +1797,6 @@ function drawGraph() {
     ctx.restore();
   }
 
-  const dim = graphDimActive();
   for (const link of state.graph.links) {
     if (!nodeIsVisible(link.a) || !nodeIsVisible(link.b)) {
       continue;
@@ -1721,6 +1858,10 @@ function drawGraph() {
       fill = pipeTint.fill;
       r = Math.max(r, pipeTint.r);
     }
+    if (graphSel && !hi) {
+      fill = "#f3a6bb";
+      r = Math.max(r, 11);
+    }
 
     const faded = dim && !isGraphFocusNode(id);
     const nodeAlpha = faded ? 0.22 : 1;
@@ -1748,17 +1889,47 @@ function drawGraph() {
     } else if (pipeTint && pipeTint.pending) {
       ctx.strokeStyle = "rgba(255,255,255,0.2)";
       ctx.lineWidth = 1.2 / cam.scale;
+    } else if (graphSel) {
+      ctx.strokeStyle = "rgba(255,245,248,0.95)";
+      ctx.lineWidth = 2.8 / cam.scale;
     }
-    ctx.arc(node.x, node.y, r, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
+    const isConcept = node.meta && node.meta.type === "concept";
 
-    if (isFolder && id !== ROOT_ID) {
+    if (isConcept) {
+      // Draw as diamond (rotated square)
+      const s = r * 1.5;
+      ctx.save();
+      ctx.translate(node.x, node.y);
+      ctx.rotate(Math.PI / 4);
       ctx.beginPath();
-      ctx.strokeStyle = `rgba(255,255,255,${0.14 * nodeAlpha})`;
-      ctx.lineWidth = 1 / cam.scale;
-      ctx.arc(node.x, node.y, r + 3.5 / cam.scale, 0, Math.PI * 2);
+      ctx.rect(-s / 2, -s / 2, s, s);
+      ctx.fill();
       ctx.stroke();
+      ctx.restore();
+      // Outer ring for selected concept
+      if (graphSel) {
+        ctx.save();
+        ctx.translate(node.x, node.y);
+        ctx.rotate(Math.PI / 4);
+        ctx.beginPath();
+        ctx.strokeStyle = "rgba(255,255,255,0.45)";
+        ctx.lineWidth = 1.2 / cam.scale;
+        ctx.rect(-(s / 2 + 4 / cam.scale), -(s / 2 + 4 / cam.scale), s + 8 / cam.scale, s + 8 / cam.scale);
+        ctx.stroke();
+        ctx.restore();
+      }
+    } else {
+      ctx.arc(node.x, node.y, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      if (isFolder && id !== ROOT_ID) {
+        ctx.beginPath();
+        ctx.strokeStyle = `rgba(255,255,255,${0.14 * nodeAlpha})`;
+        ctx.lineWidth = 1 / cam.scale;
+        ctx.arc(node.x, node.y, r + 3.5 / cam.scale, 0, Math.PI * 2);
+        ctx.stroke();
+      }
     }
 
     ctx.save();
@@ -1768,8 +1939,15 @@ function drawGraph() {
     ctx.shadowBlur = 4 / cam.scale;
     ctx.shadowOffsetX = 0;
     ctx.shadowOffsetY = 1 / cam.scale;
-    let label = id === ROOT_ID ? "root" : item.name;
-    if (id === ROOT_ID || (item && item.type === "folder")) {
+    let label;
+    if (isConcept) {
+      label = node.meta.label || id.replace("concept:", "");
+    } else if (id === ROOT_ID) {
+      label = "root";
+    } else {
+      label = item ? item.name : id;
+    }
+    if (!isConcept && (id === ROOT_ID || (item && item.type === "folder"))) {
       label += folderSummarySuffix(id);
     }
     ctx.fillText(label, node.x + r + 6 / cam.scale, node.y + 4 / cam.scale);
@@ -1833,20 +2011,46 @@ function tickGraph() {
   const rep = state.settings.graphRepulsion;
   const damp = state.settings.graphDamping;
 
+  const RADIAL_R_STEP = 160; // must match getNodes R_STEP
+  const RADIAL_K = 0.018;    // spring strength for ring constraint
+
   const nodes = [...state.graph.nodesById.values()];
   for (const node of nodes) {
-    if (dragId && node.id === dragId) {
+    if (dragId && node.id === dragId) continue;
+
+    // Root is always pinned to canvas centre regardless of pinned set.
+    if (node.id === ROOT_ID) {
+      node.x  = centerX;
+      node.y  = centerY;
+      node.vx = 0;
+      node.vy = 0;
       continue;
     }
+
     if (pinned.has(node.id)) {
       node.vx = 0;
       node.vy = 0;
       continue;
     }
+
     node.vx *= damp;
     node.vy *= damp;
-    node.vx += (centerX - node.x) * g;
-    node.vy += (centerY - node.y) * g;
+
+    if (node.depth !== undefined) {
+      // Radial ring constraint: pull node toward its target radius from centre.
+      // Replaces global gravity for tree nodes so rings stay at their orbit.
+      const dx   = node.x - centerX;
+      const dy   = node.y - centerY;
+      const dist = Math.hypot(dx, dy) || 0.001;
+      const targetR = RADIAL_R_STEP * node.depth;
+      const force   = (dist - targetR) * RADIAL_K;
+      node.vx -= (dx / dist) * force;
+      node.vy -= (dy / dist) * force;
+    } else {
+      // Fallback global gravity for non-tree node types (concept nodes etc.)
+      node.vx += (centerX - node.x) * g;
+      node.vy += (centerY - node.y) * g;
+    }
   }
 
   for (const link of state.graph.links) {
@@ -1865,7 +2069,7 @@ function tickGraph() {
     const dx = b.x - a.x;
     const dy = b.y - a.y;
     const dist = Math.max(1, Math.hypot(dx, dy));
-    const target = 72;
+    const target = RADIAL_R_STEP; // parent–child rest length matches ring spacing
     const force = (dist - target) * linkK;
     const fx = (dx / dist) * force;
     const fy = (dy / dist) * force;
@@ -1877,6 +2081,24 @@ function tickGraph() {
       b.vx -= fx;
       b.vy -= fy;
     }
+  }
+
+  // Concept edge spring forces — pull concepts toward their connected nodes
+  const conceptK = linkK * 0.35;
+  for (const edge of state.conceptEdges) {
+    const a = state.graph.nodesById.get(edge.from);
+    const b = state.graph.nodesById.get(edge.to);
+    if (!a || !b) continue;
+    if (dragId && (a.id === dragId || b.id === dragId)) continue;
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const dist = Math.max(1, Math.hypot(dx, dy));
+    const target = 160;
+    const force = (dist - target) * conceptK;
+    const fx = (dx / dist) * force;
+    const fy = (dy / dist) * force;
+    if (!pinned.has(a.id)) { a.vx += fx; a.vy += fy; }
+    if (!pinned.has(b.id)) { b.vx -= fx; b.vy -= fy; }
   }
 
   // Extra (non-tree) link spring forces — weaker than tree links
@@ -1980,6 +2202,35 @@ async function selectNodeById(id) {
     item == null ? (id === ROOT_ID ? "root" : id) : `${item.type} ${item.name}`;
   appendSelectHistory(`Graph · ${label}`);
   renderWorkspaceDeck();
+}
+
+/**
+ * Handle a graph node click with cycling behavior.
+ * First click on a node: select it (dispatches "select node <id>").
+ * Second click on the same node: expand children ("expand children").
+ * Third click on the same node: expand parents ("expand parents").
+ * Subsequent clicks cycle back to select.
+ */
+function handleNodeClick(id) {
+  if (!id) return;
+  const cycle = state.settings.clickCycle || ["self", "children", "parents"];
+  let step = 0;
+  if (state.clickCycle.nodeId === id) {
+    step = (state.clickCycle.step + 1) % cycle.length;
+  }
+  state.clickCycle = { nodeId: id, step };
+  const phase = cycle[step];
+  if (phase === "children") {
+    dispatchCommand(`select node ${id}`);
+    dispatchCommand("expand children");
+  } else if (phase === "parents") {
+    dispatchCommand(`select node ${id}`);
+    dispatchCommand("expand parents");
+  } else {
+    // "self" — just select, clear any expansion
+    dispatchCommand("expand clear");
+    dispatchCommand(`select node ${id}`);
+  }
 }
 
 function applyCard(card) {
@@ -2087,6 +2338,38 @@ async function refreshFromDisk() {
   renderTagBar();
 }
 
+async function loadContentCache(rootDir) {
+  const api = window.explorerApi;
+  if (!api || typeof api.readFilesBatch !== "function") return;
+  const relPaths = state.fsSnapshot.items
+    .filter((i) => i.type === "file")
+    .map((i) => i.relPath);
+  if (!relPaths.length) return;
+  // Read in chunks to avoid one massive IPC call on large roots.
+  const CHUNK = 50;
+  for (let i = 0; i < relPaths.length; i += CHUNK) {
+    if (state.rootDir !== rootDir) return; // root changed — abort
+    const chunk = relPaths.slice(i, i + CHUNK);
+    try {
+      const entries = await api.readFilesBatch(rootDir, chunk);
+      for (const [rel, text] of entries) {
+        state.contentCache.set(rel, text);
+      }
+    } catch { /* chunk failed — skip, keep degraded */ }
+  }
+  if (state.rootDir === rootDir) {
+    state.contentCacheReady = true;
+    // Re-render if a content filter is active so cards update now that cache is warm.
+    const hasContentFilter = (state.view.filters || []).some(
+      (f) => f.type === "content" || f.type === "body",
+    );
+    if (hasContentFilter) {
+      buildGraph();
+      renderWorkspaceDeck();
+    }
+  }
+}
+
 async function loadRoot(rootDir) {
   state.rootDir = rootDir;
   els.rootLabel.textContent = rootDir;
@@ -2113,9 +2396,27 @@ async function loadRoot(rootDir) {
   }
   clearExtSelection();
   clearCardSelection();
+  state.view.filters = [];
+  state.contentCache = new Map();
+  state.contentCacheReady = false;
+  state.concepts = {};
+  state.conceptEdges = [];
   await refreshFromDisk();
+  // Load persisted concepts (fire-and-forget; graph rebuilds after)
+  if (window.explorerApi.loadConcepts) {
+    window.explorerApi.loadConcepts(rootDir).then((data) => {
+      if (data) {
+        state.concepts = data.concepts || {};
+        state.conceptEdges = data.edges || [];
+        buildGraph();
+        renderWorkspaceDeck();
+      }
+    }).catch(() => {});
+  }
   switchAppTab("ws");
   logLine(`loaded root: ${rootDir}`);
+  // Fire content cache load in background — filters degrade gracefully until ready.
+  loadContentCache(rootDir).catch(() => {});
 }
 
 function summaryCountByTypeLines() {
@@ -2320,6 +2621,27 @@ function computeStructuralLinks(kind, items, tagsByPath) {
   return links;
 }
 
+/**
+ * Single pathway for all UI-driven commands.
+ * Records the command in cliHistory (deduplicated) and persists it to
+ * .ogx-history.log, then routes through parseCommand.
+ */
+function dispatchCommand(cmd) {
+  if (!cmd) return;
+  const last = state.cliHistory[state.cliHistory.length - 1];
+  if (cmd !== last) {
+    state.cliHistory.push(cmd);
+    while (state.cliHistory.length > 200) state.cliHistory.shift();
+  }
+  state.cliHistIndex = -1;
+  if (state.rootDir && window.explorerApi.appendHistory) {
+    window.explorerApi.appendHistory(state.rootDir, [cmd]).catch(() => {});
+  }
+  parseCommand(cmd).catch((err) => {
+    logLine(`command failed: ${err.message}`);
+  });
+}
+
 async function parseCommand(rawInput) {
   let input = rawInput.trim();
   if (!input) {
@@ -2331,29 +2653,68 @@ async function parseCommand(rawInput) {
     input = "card render" + input.slice(6);
   }
 
+  // Normalise +filter / -filter prefixes into a canonical form the handler reads.
+  // Keep the leading + or - as part of the lower string for matching below.
+
   logLine(`> ${input}`);
   const lower = input.toLowerCase();
 
   if (lower === "help") {
-    logLine("commands: help, pwd, cd, ls, refresh, save tags");
-    logLine("filter <text>, tagfilter <text>, sort <mode>, expand children|parents|siblings|+1|clear");
-    logLine("reader filter <text>|clear · reader sort manual|name-asc|…  (reader deck)");
-    logLine("select <relPath> | select siblings|children|visible | select ext <ext> | select clear");
-    logLine("tag set <csv>, tag add <tag>, card save <name>, card apply <n>");
-    logLine("reader matched | empty | all · save copy|list · tag add · paths [n]");
-    logLine("back | forward  (undo/redo); keys 4 / 6 when CLI focused");
-    logLine("reader = working-set files; cards clear (reset reader filters)");
-    logLine("Next: bulk/dynamic tagging from selection (size, regex, …)");
-    logLine("card render … | reset | save|load|list|delete  (grep uses regex; regex keeps full lines)");
-    logLine("settings … selectionhud top|bottom, cliinput top|bottom");
-    logLine("mode <folders|files|hybrid>, label …, summary | summary count | summary types");
-    logLine("ws | ws save|load|list|delete <name> | ws clear");
-    logLine("preset save|load|list|delete <name>");
-    logLine("explain");
-    logLine("settings … logfade, head, tail, gravity, repulsion, link, damping, mdsections");
-    logLine("canvas: wheel zoom, pan, drag nodes, right-click Pin (native menu)");
-    logLine("open <path> | open dir <path> [--grid|--detail]  (in-app tab)");
-    logLine("graph link ext|tags|name <pat>|grep <pat>|imports|refs|clear|list");
+    logLine("── Navigation ──────────────────────────────────");
+    logLine("  pwd · cd <path> · ls · refresh · reset");
+    logLine("── Graph display ───────────────────────────────");
+    logLine("  mode folders|files|hybrid");
+    logLine("── Filters (set membership) ─────────────────────");
+    logLine("  filter <sub> <value>        replace filters (non-sticky default)");
+    logLine("  +filter <sub> <value>       add to active filters");
+    logLine("  -filter <sub> <value>       remove specific filter");
+    logLine("  filter ext -pyc             inline negation (exclude .pyc)");
+    logLine("  sub: name | content | body | ext | tag | meta");
+    logLine("  filter                      show active filters");
+    logLine("  filter clear                clear all filters");
+    logLine("── Selection & working set ─────────────────────");
+    logLine("  select node <id>            select graph node (click cycles: self→children→parents)");
+    logLine("  select card <relPath>       select reader card (sets render scope)");
+    logLine("  select <relPath> | select ext <ext>");
+    logLine("  select tag <tag> | select siblings|children|visible | select clear");
+    logLine("  expand children|parents|siblings|+1|clear");
+    logLine("  ws | ws save|load|list|delete <name>");
+    logLine("── Reader deck ─────────────────────────────────");
+    logLine("  reader filter <text>   (secondary deck filter by name)");
+    logLine("  reader sort name-asc|name-desc|type-asc|type-desc");
+    logLine("── Render pipeline (display only — never changes the set) ───");
+    logLine("  render grep <pat> | head <n> | col <n,m> | regex <pat>  (chainable with |)");
+    logLine("  render reset");
+    logLine("  render save|load|list|delete <name>");
+    logLine("── Tagging ─────────────────────────────────────");
+    logLine("  tag <name>                    (tag selected node, or all visible reader rows)");
+    logLine("  tag <name> where grep <pat>   (tag reader files matching pattern)");
+    logLine("  tag clear | tag list");
+    logLine("  save tags");
+    logLine("── Concept nodes + typed edges ──────────────────");
+    logLine("  add edge <type> concept(<name>)   from selection → concept (creates if needed)");
+    logLine("  add edge <type> <nodeId>          from selection → any node");
+    logLine("  concept list | concept remove <name>");
+    logLine("  concept save                      persist to .ogx-concepts.json");
+    logLine("── Graph links (non-tree edges) ────────────────");
+    logLine("  graph link ext|tags|name <pat>|grep <pat>|imports|refs");
+    logLine("  graph link clear | graph link list");
+    logLine("  graph new <name> | graph save|load|list|delete <name>");
+    logLine("── Browsing ────────────────────────────────────");
+    logLine("  open <path>                   (open file in tab)");
+    logLine("  open dir <path> [--grid]      (open folder in tab)");
+    logLine("── History & state ─────────────────────────────");
+    logLine("  history | history last <n>    (copy to clipboard)");
+    logLine("  explain                       (print state recipe)");
+    logLine("  back | forward                (undo/redo  ·  keys 4/6)");
+    logLine("  preset save|load|list|delete <name>");
+    logLine("── Settings ────────────────────────────────────");
+    logLine("  settings gravity|repulsion|link|damping <n>");
+    logLine("  settings head|tail <n>  ·  mdsections on|off");
+    logLine("  settings selectionhud top|bottom  ·  cliinput top|bottom");
+    logLine("── Canvas ──────────────────────────────────────");
+    logLine("  wheel: zoom  ·  drag: pan  ·  drag node: move  ·  right-click: pin");
+    logLine("  keys: 1/3 prev/next tab  ·  4/6 undo/redo  ·  ↑/↓ command history");
     return;
   }
 
@@ -2524,22 +2885,12 @@ async function parseCommand(rawInput) {
       logLine(`reader paths: showing ${slice.length} of ${files.length} (reader save list <file> for all)`);
       return;
     }
-    const m = rlow.match(/^(?:show\s+)?(matched|empty|all)$/);
-    if (!m) {
-      logLine(
-        "usage: reader matched|empty|all · filter|sort · save copy|list · tag add · paths [n]",
-      );
+    if (rlow.match(/^(?:show\s+)?(matched|empty|all)$/)) {
+      logLine("reader matched/empty/all removed — render does not control deck membership.");
+      logLine("Use filter content <text> to filter by file content.");
       return;
     }
-    pushCliUndo();
-    if (m[1] === "all") {
-      state.workspace.pipelineResultFilter = null;
-    } else {
-      state.workspace.pipelineResultFilter = m[1];
-    }
-    renderWorkspaceDeck();
-    appendSelectHistory(`Pipeline result filter: ${state.workspace.pipelineResultFilter || "off"}`);
-    logLine(`reader pipeline filter: ${state.workspace.pipelineResultFilter || "off"}`);
+    logLine("usage: reader filter|sort · save copy|list · tag add · paths [n]");
     return;
   }
 
@@ -2662,8 +3013,18 @@ async function parseCommand(rawInput) {
     recipe.push(`# OpenGraphXplorer state recipe — ${new Date().toLocaleString()}`);
     recipe.push(`cd ${state.rootDir || "(no root)"}`);
     if (state.view.mode !== "folders") recipe.push(`mode ${state.view.mode}`);
-    if (state.view.searchText) recipe.push(`filter ${state.view.searchText}`);
-    if (state.view.tagFilter) recipe.push(`tagfilter ${state.view.tagFilter}`);
+    // Serialize canonical filters[] — first is a replace, rest are additive
+    const activeFilters = state.view.filters || [];
+    activeFilters.forEach((f, i) => {
+      const prefix = i === 0 ? "" : "+";
+      const neg = f.negate ? "-" : "";
+      recipe.push(`${prefix}filter ${f.type} ${neg}${f.value || ""}`);
+    });
+    // Legacy fallback fields (only if no canonical filters)
+    if (!activeFilters.length) {
+      if (state.view.searchText) recipe.push(`filter ${state.view.searchText}`);
+      if (state.view.tagFilter) recipe.push(`tagfilter ${state.view.tagFilter}`);
+    }
     if (state.view.sortMode && state.view.sortMode !== "name-asc") recipe.push(`sort ${state.view.sortMode}`);
     if (state.extSelection) recipe.push(`select ext ${state.extSelection.ext}`);
     if (state.view.selectedId && state.view.selectedId !== ROOT_ID) recipe.push(`select ${state.view.selectedId}`);
@@ -2777,35 +3138,17 @@ async function parseCommand(rawInput) {
       logLine(`deleted saved pipeline: ${name}`);
       return;
     }
-    // Strip trailing "| matched/empty/all" suffix before parsing pipeline
-    let renderInput = input;
-    let readerFilterSuffix;
-    {
-      const pipeSegments = input.replace(/^card\s+render\s*/i, "").split("|").map((s) => s.trim());
-      const last = pipeSegments[pipeSegments.length - 1].toLowerCase();
-      if (last === "matched" || last === "empty" || last === "all") {
-        readerFilterSuffix = last === "all" ? null : last;
-        renderInput = `card render ${pipeSegments.slice(0, -1).join(" | ")}`.trimEnd();
-      }
-    }
-    const parsed = EP.parseCardRenderCommand(renderInput);
-    if (parsed.reset && !readerFilterSuffix) {
+    const parsed = EP.parseCardRenderCommand(input);
+    if (parsed.reset) {
       pushCliUndo();
       state.cardRender = { pipeline: [] };
       state.readerPipelineMatchByRel.clear();
-      state.workspace.pipelineResultFilter = null;
       appendSelectHistory("Card render: reset");
       logLine("card render reset");
     } else {
       pushCliUndo();
-      if (!parsed.reset) {
-        state.cardRender = { pipeline: parsed.pipeline || [] };
-        state.readerPipelineMatchByRel.clear();
-      }
-      if (readerFilterSuffix !== undefined) {
-        state.workspace.pipelineResultFilter = readerFilterSuffix;
-        logLine(`reader filter: ${readerFilterSuffix || "all"}`);
-      }
+      state.cardRender = { pipeline: parsed.pipeline || [] };
+      state.readerPipelineMatchByRel.clear();
       appendSelectHistory(`Card render: ${state.cardRender.pipeline.length} step(s)`);
       logLine(
         `card render: ${state.cardRender.pipeline.length} step(s) — ${state.selection.relPath || state.workspace.selectedCardRelPath ? "scoped to selection" : "all reader cards"}`,
@@ -2931,11 +3274,126 @@ async function parseCommand(rawInput) {
     return;
   }
 
-  if (lower === "filter" || lower.startsWith("filter ")) {
-    state.view.searchText = lower === "filter" ? "" : input.slice(7).trim().toLowerCase();
+  // ── filter command ────────────────────────────────────────────────────────
+  // Principle: filter = set membership.  render = display.  Never mixed.
+  //
+  // filter                         → show active filters
+  // filter clear                   → clear all filters
+  // filter name <text>             → by filename / relPath
+  // filter content <text>          → by file content  (alias: filter body)
+  // filter body <text>             → alias for content
+  // filter ext <ext>               → by file extension
+  // filter tag <tag>               → by tag
+  // filter meta <expr>             → by metadata  (size>2mb, type:file, …)
+  // filter <text>                  → shorthand for filter name <text>
+  if (lower === "filter") {
+    const active = state.view.filters || [];
+    if (!active.length) {
+      logLine("no active filters");
+    } else {
+      active.forEach((f) => {
+        const prefix = f.pinned ? "+" : " ";
+        const neg = f.negate ? "NOT " : "";
+        logLine(`  ${prefix}filter ${f.type} ${neg}${f.value || ""}`);
+      });
+    }
+    return;
+  }
+
+  if (lower === "filter clear") {
+    pushCliUndo();
+    state.view.filters = [];
+    state.view.searchText = "";
+    state.view.tagFilter = "";
+    clearExtSelection();
     buildGraph();
     renderWorkspaceDeck();
-    logLine(state.view.searchText ? `filter: "${state.view.searchText}"` : "filter cleared");
+    logLine("all filters cleared");
+    return;
+  }
+
+  // filter / +filter / -filter
+  if (lower.startsWith("filter ") || lower.startsWith("+filter ") || lower.startsWith("-filter ")) {
+    // Determine operation mode
+    let mode = "replace"; // default: non-sticky
+    let cmdBody = input;
+    if (lower.startsWith("+filter ")) {
+      mode = "add";
+      cmdBody = input.slice(1); // strip leading +
+    } else if (lower.startsWith("-filter ")) {
+      mode = "remove";
+      cmdBody = input.slice(1); // strip leading -
+    }
+
+    const rest = cmdBody.slice(7).trim(); // after "filter "
+    const restLower = rest.toLowerCase();
+
+    // Parse subtype and value
+    let subtype = null;
+    let value = rest;
+
+    if (restLower.startsWith("name "))        { subtype = "name";    value = rest.slice(5).trim(); }
+    else if (restLower.startsWith("content "))  { subtype = "content"; value = rest.slice(8).trim(); }
+    else if (restLower.startsWith("body "))     { subtype = "body";    value = rest.slice(5).trim(); }
+    else if (restLower.startsWith("ext "))      { subtype = "ext";     value = rest.slice(4).trim(); }
+    else if (restLower.startsWith("tag "))      { subtype = "tag";     value = rest.slice(4).trim(); }
+    else if (restLower.startsWith("meta "))     { subtype = "meta";    value = rest.slice(5).trim(); }
+    else { subtype = "name"; } // bare "filter <text>" → name filter
+
+    if (!value) {
+      logLine(`usage: filter ${subtype} <value>`);
+      return;
+    }
+
+    // Detect inline negation: "filter ext -pyc" → negate = true, value = "pyc"
+    let negate = false;
+    if (value.startsWith("-") && subtype !== "meta") {
+      negate = true;
+      value = value.slice(1).trim();
+    }
+    value = value.toLowerCase();
+
+    if (!value) {
+      logLine(`usage: filter ${subtype} <value>`);
+      return;
+    }
+
+    pushCliUndo();
+
+    if (mode === "remove") {
+      // Remove any filter matching this type+value
+      state.view.filters = (state.view.filters || []).filter(
+        (f) => !(f.type === subtype && f.value === value && !!f.negate === negate)
+      );
+      logLine(`filter removed: ${subtype} ${negate ? "NOT " : ""}${value}`);
+    } else if (mode === "add") {
+      // Pin this filter — survives future plain `filter` replacements
+      state.view.filters = (state.view.filters || []);
+      state.view.filters.push({ type: subtype, value, negate, pinned: true });
+      logLine(`+filter ${subtype}: "${value}"`);
+    } else {
+      // Replace only the previous non-pinned filter; keep all pinned (+filter) entries
+      state.view.filters = (state.view.filters || []).filter((f) => f.pinned);
+      state.view.filters.push({ type: subtype, value, negate, pinned: false });
+      state.view.searchText = "";
+      state.view.tagFilter = "";
+      logLine(`filter ${subtype}: "${value}"${negate ? " (NOT)" : ""}`);
+    }
+
+    // ext filter also drives graph node highlighting
+    if (subtype === "ext" && !negate) {
+      applyExtSelection(value, { silent: true });
+    } else if (subtype === "ext" && negate) {
+      clearExtSelection();
+    }
+
+    // Warn if content cache not yet warm
+    if ((subtype === "content" || subtype === "body") && !state.contentCacheReady) {
+      logLine(`filter ${subtype}: content index still loading — results may be incomplete`);
+    }
+
+    buildGraph();
+    renderWorkspaceDeck();
     return;
   }
 
@@ -3005,6 +3463,24 @@ async function parseCommand(rawInput) {
       renderWorkspaceDeck();
       appendSelectHistory(`Select tag: "${tagName}"`);
       logLine(`select tag: showing files tagged "${tagName}"`);
+      return;
+    }
+    if (argLower.startsWith("node ")) {
+      const nodeId = arg.slice(5).trim();
+      if (!nodeId) {
+        logLine("usage: select node <id>");
+        return;
+      }
+      await selectNodeById(nodeId);
+      return;
+    }
+    if (argLower.startsWith("card ")) {
+      const relPath = arg.slice(5).trim().replace(/^"|"$/g, "");
+      if (!relPath) {
+        logLine("usage: select card <relPath>");
+        return;
+      }
+      selectCardInDeck(relPath);
       return;
     }
     await selectNodeById(arg);
@@ -3091,17 +3567,18 @@ async function parseCommand(rawInput) {
     }
 
     // 'tag <text>' — two modes:
-    //   A) graph node selected → tag that node
-    //   B) no graph node (root) → bulk-tag all currently visible reader files
+    //   A) graph node selected → tag that node only
+    //   B) root selected (no node) → bulk-tag all currently visible reader files
     if (state.view.selectedId !== ROOT_ID) {
       const existing = new Set(getTagsForId(state.view.selectedId));
       existing.add(tagArg);
       setTagsForId(state.view.selectedId, [...existing].join(", "));
       buildGraph(); renderWorkspaceDeck(); renderTagBar();
-      logLine(`tagged "${state.view.selectedId.split("/").pop()}": ${[...existing].join(", ")}`);
+      const selName = state.view.selectedId.split("/").pop();
+      logLine(`tagged "${selName}": ${[...existing].join(", ")}  (to tag all reader items: select clear, then tag)`);
       return;
     }
-    // No graph node — tag the reader's current visible rows (respects matched/empty filter)
+    // No graph node — tag the reader's current visible rows
     const visibleRows = getWorkspaceRowsForDisplay().filter((i) => i.type === "file");
     if (!visibleRows.length) {
       logLine("reader is empty — select a graph node or populate the reader first");
@@ -3119,6 +3596,113 @@ async function parseCommand(rawInput) {
     if (visibleRows.length > 5) logLine(`  … and ${visibleRows.length - 5} more`);
     logLine(`tagged ${n} reader file(s) with "${tagArg}" (save tags to persist)`);
     appendSelectHistory(`Tag "${tagArg}" → ${n} reader files`);
+    return;
+  }
+
+  // ── Concept node + edge commands ────────────────────────────────────────────
+  //
+  //   add edge <type> <node-id>              from selection → target
+  //   add edge <type> concept(<name>)        create concept if needed, then add edges
+  //   concept save                           persist to .ogx-concepts.json
+  //   concept list                           show all concept nodes + edge count
+  //   concept remove <name>                  remove concept and its edges
+
+  if (lower.startsWith("add edge ")) {
+    const rest = input.slice(9).trim();
+    if (!rest) {
+      logLine("usage: add edge <type> <target>  e.g. add edge has-a concept(engine)");
+      return;
+    }
+
+    // Parse: "has-a concept(engine)"  or  "has-a concept:engine"  or  "has-a <nodeId>"
+    const spaceIdx = rest.indexOf(" ");
+    if (spaceIdx < 0) {
+      logLine("usage: add edge <type> <target>");
+      return;
+    }
+    const edgeType = rest.slice(0, spaceIdx).trim().toLowerCase();
+    let targetRaw = rest.slice(spaceIdx + 1).trim();
+
+    // Resolve or create concept via concept(<name>) or concept:<name>
+    const conceptMatch = targetRaw.match(/^concept\((.+?)\)$/i) || targetRaw.match(/^concept:(.+)$/i);
+    let targetId = targetRaw;
+    if (conceptMatch) {
+      const conceptName = conceptMatch[1].trim().toLowerCase();
+      if (!state.concepts[conceptName]) {
+        state.concepts[conceptName] = {};
+        logLine(`concept created: "${conceptName}"`);
+        buildGraph();
+      }
+      targetId = `concept:${conceptName}`;
+    }
+
+    // Determine source nodes from current selection
+    let sourceIds;
+    if (state.view.selectedId !== ROOT_ID) {
+      sourceIds = [state.view.selectedId];
+    } else {
+      // Use all current working set reader rows
+      sourceIds = getWorkspaceRowsForDisplay().map((i) => i.relPath);
+    }
+
+    if (!sourceIds.length) {
+      logLine("nothing selected — select a node or populate the reader first");
+      return;
+    }
+
+    let added = 0;
+    for (const fromId of sourceIds) {
+      // Deduplicate: skip if identical edge already exists
+      const exists = state.conceptEdges.some(
+        (e) => e.from === fromId && e.to === targetId && e.type === edgeType
+      );
+      if (!exists) {
+        state.conceptEdges.push({ from: fromId, to: targetId, type: edgeType });
+        added++;
+      }
+    }
+
+    buildGraph();
+    logLine(`add edge: ${added} × "${edgeType}" → ${targetId}  (concept save to persist)`);
+    appendSelectHistory(`add edge ${edgeType} → ${targetId} (${added})`);
+    return;
+  }
+
+  if (lower === "concept save") {
+    if (!state.rootDir) { logLine("no root loaded"); return; }
+    const data = { concepts: state.concepts, edges: state.conceptEdges };
+    await window.explorerApi.saveConcepts(state.rootDir, data);
+    logLine(`concepts saved: ${Object.keys(state.concepts).length} concept(s), ${state.conceptEdges.length} edge(s)`);
+    return;
+  }
+
+  if (lower === "concept list" || lower === "concept") {
+    const names = Object.keys(state.concepts);
+    if (!names.length) {
+      logLine("no concept nodes defined");
+      return;
+    }
+    names.forEach((name) => {
+      const edgeCount = state.conceptEdges.filter(
+        (e) => e.from === `concept:${name}` || e.to === `concept:${name}`
+      ).length;
+      logLine(`  concept:${name}  (${edgeCount} edge${edgeCount !== 1 ? "s" : ""})`);
+    });
+    logLine(`${names.length} concept(s) · ${state.conceptEdges.length} total edge(s)`);
+    return;
+  }
+
+  if (lower.startsWith("concept remove ")) {
+    const name = input.slice(15).trim().toLowerCase();
+    if (!name) { logLine("usage: concept remove <name>"); return; }
+    if (!state.concepts[name]) { logLine(`concept not found: "${name}"`); return; }
+    delete state.concepts[name];
+    const before = state.conceptEdges.length;
+    state.conceptEdges = state.conceptEdges.filter(
+      (e) => e.from !== `concept:${name}` && e.to !== `concept:${name}`
+    );
+    buildGraph();
+    logLine(`concept removed: "${name}" (${before - state.conceptEdges.length} edge(s) removed)`);
     return;
   }
 
@@ -3230,7 +3814,9 @@ async function parseCommand(rawInput) {
     }
     state.view.mode = nextMode;
     logLine(`mode: ${nextMode}`);
+    buildGraph();
     renderWorkspaceDeck();
+    renderActiveStatePanel();
     return;
   }
 
@@ -3795,7 +4381,7 @@ function wireCanvasInteraction() {
     canvas.style.cursor = hitTestNodeId(sx, sy) ? "grab" : "default";
 
     if (!moved && mode === "node" && draggedNodeId) {
-      selectNodeById(draggedNodeId);
+      handleNodeClick(draggedNodeId);
     }
   });
 
@@ -3913,6 +4499,7 @@ window.addEventListener("resize", () => {
 
 EP.registerNodeType("file",    { visibleInModes: new Set(["files", "hybrid"]) });
 EP.registerNodeType("folder",  { visibleInModes: new Set(["folders", "hybrid"]) });
+EP.registerNodeType("concept", { visibleInModes: new Set(["files", "folders", "hybrid"]) });
 
 // ── Card renderer registration ─────────────────────────────────────────────
 // Register additional types here when new node types are introduced.
@@ -3927,12 +4514,62 @@ EP.registerCardRenderer("file", buildFileCard);
 EP.registerGraphSource({
   id: "filesystem",
   getNodes(ctx) {
-    const { state: s, world } = ctx;
+    const { state: s, world, existing } = ctx;
     const cx = world.w * 0.5;
     const cy = world.h * 0.5;
-    const nodes = [{ id: ROOT_ID, x: cx, y: cy }];
+
+    // Radial initial layout — root at centre, children radiate outward.
+    // Only positions nodes that aren't already in ctx.existing (physics-settled nodes
+    // keep their current position; only freshly-appearing nodes get placed).
+    const R_STEP = 160; // px per depth level
+
+    // Build parent → [childId, …] map
+    const childrenOf = new Map();
+    childrenOf.set(ROOT_ID, []);
     for (const item of s.fsSnapshot.items) {
-      nodes.push({ id: itemIdFromRelPath(item.relPath) });
+      const id = itemIdFromRelPath(item.relPath);
+      const pid = itemIdFromRelPath(parentRelPath(item.relPath));
+      if (!childrenOf.has(pid)) childrenOf.set(pid, []);
+      childrenOf.get(pid).push(id);
+      if (!childrenOf.has(id)) childrenOf.set(id, []);
+    }
+
+    // BFS: assign depth (always) and initial position (only for new nodes)
+    const depthOf  = new Map(); // id → depth integer
+    const positions = new Map(); // id → {x, y}  (only new nodes)
+    depthOf.set(ROOT_ID, 0);
+
+    function layout(parentId, parentX, parentY, startAngle, sweepAngle, depth) {
+      const kids = childrenOf.get(parentId) || [];
+      if (!kids.length) return;
+      const r = R_STEP * depth;
+      const step = sweepAngle / kids.length;
+      kids.forEach((id, i) => {
+        depthOf.set(id, depth);
+        let px = parentX, py = parentY;
+        if (!existing.has(id)) {
+          const angle = startAngle + step * (i + 0.5);
+          px = parentX + Math.cos(angle) * r;
+          py = parentY + Math.sin(angle) * r;
+          positions.set(id, { x: px, y: py });
+        } else {
+          const e = existing.get(id);
+          px = e.x; py = e.y;
+        }
+        layout(id, px, py, startAngle + step * i, step, depth + 1);
+      });
+    }
+    layout(ROOT_ID, cx, cy, 0, Math.PI * 2, 1);
+
+    // Root always at center, depth=0
+    const nodes = [{ id: ROOT_ID, x: cx, y: cy, meta: { depth: 0 } }];
+    for (const item of s.fsSnapshot.items) {
+      const id = itemIdFromRelPath(item.relPath);
+      const pos  = positions.get(id);
+      const depth = depthOf.get(id) ?? 1;
+      nodes.push(pos
+        ? { id, x: pos.x, y: pos.y, meta: { depth } }
+        : { id, meta: { depth } });
     }
     return nodes;
   },
@@ -3944,6 +4581,58 @@ EP.registerGraphSource({
       links.push({ a: parentId, b: id });
     }
     return links;
+  },
+});
+
+// ── Concept node graph source ──────────────────────────────────────────────
+// Concept nodes appear in all modes. They have no filesystem parent so they
+// are not in the BFS tree; they float and are pulled by their concept edges.
+
+EP.registerGraphSource({
+  id: "concepts",
+  getNodes(ctx) {
+    const concepts = ctx.state.concepts || {};
+    const existing = ctx.existing || new Map();
+    const edges = ctx.state.conceptEdges || [];
+    const cx = ctx.world.w * 0.5;
+    const cy = ctx.world.h * 0.5;
+    return Object.keys(concepts).map((name) => {
+      const id = `concept:${name}`;
+      let x;
+      let y;
+      if (!existing.has(id)) {
+        const neighbors = [];
+        for (const edge of edges) {
+          if (edge.from === id && existing.has(edge.to)) {
+            neighbors.push(existing.get(edge.to));
+          } else if (edge.to === id && existing.has(edge.from)) {
+            neighbors.push(existing.get(edge.from));
+          }
+        }
+        if (neighbors.length) {
+          const avgX = neighbors.reduce((sum, node) => sum + node.x, 0) / neighbors.length;
+          const avgY = neighbors.reduce((sum, node) => sum + node.y, 0) / neighbors.length;
+          const angle = Math.random() * Math.PI * 2;
+          const radius = 48 + Math.random() * 24;
+          x = avgX + Math.cos(angle) * radius;
+          y = avgY + Math.sin(angle) * radius;
+        } else {
+          x = cx + (Math.random() - 0.5) * 140;
+          y = cy + (Math.random() - 0.5) * 140;
+        }
+      }
+      return {
+        id,
+        x,
+        y,
+        meta: { type: "concept", label: name },
+      };
+    });
+  },
+  getLinks(_ctx) {
+    // Concept edges are handled separately in physics + draw;
+    // no tree links emitted here so concept nodes start as free-floating.
+    return [];
   },
 });
 

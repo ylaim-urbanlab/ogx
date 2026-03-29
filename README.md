@@ -27,6 +27,14 @@ Requires [Node.js](https://nodejs.org) and [pnpm](https://pnpm.io). Electron is 
 
 Click **Pick root** to open a folder, or **./testenv** to load the built-in sample data.
 
+If Electron logs repeated Chromium GPU errors such as `Creation of StagingBuffer's SharedImage failed`, start in software-rendered mode instead:
+
+```
+pnpm start:safe
+```
+
+You can also force that mode with `OGX_DISABLE_GPU=1 pnpm start`, or re-enable hardware acceleration with `OGX_ENABLE_GPU=1`.
+
 ---
 
 ## Core concepts

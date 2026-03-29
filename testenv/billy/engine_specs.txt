@@ -1,0 +1,9 @@
+Engine: 5.0L Coyote V8
+Displacement: 302 cubic inches
+Horsepower: 450 hp @ 7,000 rpm
+Torque: 410 lb-ft @ 4,600 rpm
+Compression: 12.0:1
+Fuel: Premium recommended
+Block: Aluminum
+Head: DOHC, 4 valves per cylinder
+Notes: Stock tune. No modifications. Oil changed every 5,000 miles with 5W-30 synthetic.

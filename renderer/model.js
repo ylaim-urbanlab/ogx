@@ -3,16 +3,35 @@
   const EP = {};
 
   // ── Filter handler registry ────────────────────────────────────────────────
-  // Each handler: (items, filterSpec, helpers) → filteredItems
-  // Register new filter types here without touching the pipeline logic.
+  //
+  // Invariant: FILTER → defines set membership. RENDER → defines display.
+  // Filters must never read render output; render must never influence membership.
+  //
+  // Each descriptor:
+  //   { phase: "pre", fn: (items, filterSpec, helpers) → filteredItems }
+  //
+  // phase "pre"  — runs before expansion (reduces the seed set)
+  // Only "pre" is used today; "post" is reserved for future use.
+  //
+  // helpers available to handlers:
+  //   getTagsForId(relPath)         → string[]
+  //   getContentForRelPath(relPath) → string | null  (from content cache)
 
   EP.FILTER_HANDLERS = {};
 
-  EP.registerFilter = function registerFilter(type, handler) {
-    EP.FILTER_HANDLERS[type] = handler;
+  EP.registerFilter = function registerFilter(type, descriptor) {
+    // Accept both plain function (legacy) and descriptor object.
+    if (typeof descriptor === "function") {
+      EP.FILTER_HANDLERS[type] = { phase: "pre", fn: descriptor };
+    } else {
+      EP.FILTER_HANDLERS[type] = { phase: descriptor.phase || "pre", fn: descriptor.fn };
+    }
   };
 
-  EP.registerFilter("text", function (items, filter) {
+  // ── Built-in filter handlers ──────────────────────────────────────────────
+
+  // "name" — filter by item.name / item.relPath  (was "text")
+  EP.registerFilter("name", function (items, filter) {
     const needle = (filter.value || "").toLowerCase();
     if (!needle) return items;
     return items.filter(
@@ -21,7 +40,26 @@
         item.relPath.toLowerCase().includes(needle),
     );
   });
+  // Backward-compat alias
+  EP.registerFilter("text", EP.FILTER_HANDLERS["name"]);
 
+  // "content" / "body" — filter by file text (reads from helpers.getContentForRelPath)
+  // Degrades gracefully: items without cached content are kept (not excluded) so
+  // a warming cache never silently drops cards.
+  EP.registerFilter("content", function (items, filter, helpers) {
+    const needle = (filter.value || "").toLowerCase();
+    if (!needle) return items;
+    const getContent = helpers && helpers.getContentForRelPath;
+    if (typeof getContent !== "function") return items; // cache not available
+    return items.filter((item) => {
+      const text = getContent(item.relPath);
+      if (text == null) return true; // not yet cached → keep (degrade gracefully)
+      return text.toLowerCase().includes(needle);
+    });
+  });
+  EP.registerFilter("body", EP.FILTER_HANDLERS["content"]);
+
+  // "tag" — filter by tag store
   EP.registerFilter("tag", function (items, filter, helpers) {
     const needle = (filter.value || "").toLowerCase();
     if (!needle) return items;
@@ -33,6 +71,7 @@
     });
   });
 
+  // "ext" — filter by file extension
   EP.registerFilter("ext", function (items, filter) {
     const ext = (filter.value || "").toLowerCase();
     if (!ext) return items;
@@ -47,32 +86,95 @@
     });
   });
 
+  // "meta" — filter by item metadata: size, type
+  // Supported expressions (parsed from filter.value string):
+  //   size>2mb  size<500kb  size>1024  (bytes when no unit)
+  //   type:file  type:folder
+  EP.registerFilter("meta", function (items, filter) {
+    const expr = (filter.value || "").trim().toLowerCase();
+    if (!expr) return items;
+
+    // size comparison: size>2mb, size<500kb, size>=1024, size<=2048
+    const sizeM = expr.match(/^size\s*([><=!]+)\s*([\d.]+)\s*(mb|kb|b)?$/);
+    if (sizeM) {
+      const op = sizeM[1];
+      let val = parseFloat(sizeM[2]);
+      const unit = sizeM[3] || "b";
+      if (unit === "mb") val *= 1024 * 1024;
+      else if (unit === "kb") val *= 1024;
+      return items.filter((item) => {
+        const s = item.size || 0;
+        if (op === ">")  return s > val;
+        if (op === ">=") return s >= val;
+        if (op === "<")  return s < val;
+        if (op === "<=") return s <= val;
+        if (op === "=" || op === "==") return s === val;
+        return true;
+      });
+    }
+
+    // type: file | folder
+    const typeM = expr.match(/^type\s*[:=]\s*(file|folder)$/);
+    if (typeM) {
+      const want = typeM[1];
+      return items.filter((item) => item.type === want);
+    }
+
+    return items; // unknown meta expression — no-op
+  });
+
+  // ── Apply + build ─────────────────────────────────────────────────────────
+
   // Apply an ordered array of filter specs to an item list.
   EP.applyPreFilters = function applyPreFilters(items, filters, helpers) {
     let result = items;
     for (const filter of filters || []) {
       if (!filter || !filter.type) continue;
-      const handler = EP.FILTER_HANDLERS[filter.type];
-      if (handler) result = handler(result, filter, helpers || {});
+      const descriptor = EP.FILTER_HANDLERS[filter.type];
+      if (!descriptor) continue;
+      const kept = descriptor.fn(result, filter, helpers || {});
+      if (filter.negate) {
+        // Return items NOT in the kept set
+        const keptSet = new Set(kept);
+        result = result.filter((item) => !keptSet.has(item));
+      } else {
+        result = kept;
+      }
     }
     return result;
   };
 
   // Derive the current filter spec array from state.
-  // New filter types (e.g. "concept") just need to push onto state.view.filters
-  // and register a handler — no pipeline changes required.
+  //
+  // Canonical source: state.view.filters[]  (new unified array)
+  // Legacy fallback:  state.view.searchText / tagFilter / state.extSelection
+  //   — kept for undo/bookmark deserialization only; never written by new code.
+  //
+  // De-duplication: if a type already appears in state.view.filters, the legacy
+  // field for that type is ignored.
   EP.buildPreFilters = function buildPreFilters(state) {
     const filters = [];
-    if (state.view && state.view.searchText) {
-      filters.push({ type: "text", value: state.view.searchText });
+    const seen = new Set();
+
+    // Canonical filters first
+    for (const f of (state.view && state.view.filters) || []) {
+      if (f && f.type) {
+        filters.push(f);
+        seen.add(f.type);
+      }
     }
-    if (state.view && state.view.tagFilter) {
+
+    // Legacy fallbacks (backward compat with saved snapshots / undo stacks)
+    if (!seen.has("name") && !seen.has("text") && state.view && state.view.searchText) {
+      filters.push({ type: "name", value: state.view.searchText });
+    }
+    if (!seen.has("tag") && state.view && state.view.tagFilter) {
       filters.push({ type: "tag", value: state.view.tagFilter });
     }
-    if (state.extSelection && state.extSelection.ext) {
+    if (!seen.has("ext") && state.extSelection && state.extSelection.ext) {
       filters.push({ type: "ext", value: state.extSelection.ext });
     }
-    // Future: merge state.view.filters[] here for concept/semantic filter types
+
     return filters;
   };
 
@@ -89,6 +191,9 @@
   // text/tag-matching children even when an ext filter is active.
   EP.buildWorkingSet = function buildWorkingSet(allItems, state, helpers) {
     const ROOT_ID = helpers.ROOT_ID || "__root__";
+    const normRel = helpers.normRel || ((v) => v);
+    const selectedId = state.view && state.view.selectedId;
+    const findFn = helpers.findItemByRelPath || helpers.findItemById;
 
     const allFilters = EP.buildPreFilters(state);
 
@@ -100,7 +205,25 @@
     );
 
     // Phase 1: working set base = all pre-filters including ext
-    const base = EP.applyPreFilters(allItems, allFilters, helpers);
+    let base = EP.applyPreFilters(allItems, allFilters, helpers);
+
+    // Selection scope: a selected file narrows to itself; a selected folder narrows
+    // to its subtree. This keeps the reader + match counts aligned with graph selection.
+    if (selectedId && selectedId !== ROOT_ID) {
+      const anchor = findFn ? findFn(selectedId) : null;
+      if (anchor) {
+        if (anchor.type === "file") {
+          base = base.filter((item) => normRel(item.relPath) === normRel(anchor.relPath));
+        } else if (anchor.type === "folder") {
+          const anchorRel = normRel(anchor.relPath);
+          const prefix = anchorRel ? `${anchorRel}/` : "";
+          base = base.filter((item) => {
+            const rel = normRel(item.relPath);
+            return rel === anchorRel || rel.startsWith(prefix);
+          });
+        }
+      }
+    }
 
     // Phase 2: expansion (optional)
     if (!state.wsExpansion) {
@@ -108,9 +231,8 @@
     }
 
     let seed = base;
-    if (state.view && state.view.selectedId && state.view.selectedId !== ROOT_ID) {
-      const findFn = helpers.findItemByRelPath || helpers.findItemById;
-      const anchor = findFn ? findFn(state.view.selectedId) : null;
+    if (selectedId && selectedId !== ROOT_ID) {
+      const anchor = findFn ? findFn(selectedId) : null;
       if (anchor) seed = [anchor];
     }
 

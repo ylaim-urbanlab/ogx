@@ -1,0 +1,12 @@
+Engine Oil Change Log — Honda Civic EX (henry)
+Vehicle: 2019 Honda Civic EX
+Oil spec: 0W-20 full synthetic
+
+Date        Odometer    Brand               Filter
+2023-01-14  55,200      Mobil 1 Extended    OEM Honda
+2023-07-02  61,440      Castrol Edge        Fram Ultra
+2024-01-20  67,300      Mobil 1 Extended    OEM Honda
+2024-08-05  73,900      Pennzoil Platinum   OEM Honda
+
+Notes: Changed at ~6,500 mile intervals. No oil consumption between changes.
+Stick to 0W-20 — engine spec; do not substitute with 5W-30.

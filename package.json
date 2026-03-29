@@ -6,6 +6,7 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
+    "start:safe": "electron . --safe-gpu",
     "test:pipeline": "node test/pipeline-apply.test.cjs",
     "test:selection": "node test/selection.test.cjs"
   },
