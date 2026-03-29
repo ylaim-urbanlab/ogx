@@ -7,9 +7,6 @@ const TAGS_FILE = ".ogx-tags.json";
 const CARDS_FILE = ".ogx-view-cards.json";
 
 // Keep Chromium cache out of restricted synced folders (e.g. OneDrive).
-const userDataDir = path.join(app.getPath("temp"), "OpenGraphXplorer-user-data");
-app.setPath("userData", userDataDir);
-app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -1195,6 +1192,8 @@ ipcMain.handle("browse-tab-parent", async (_e, { rootDir, dirPath }) => {
 });
 
 app.whenReady().then(() => {
+  const userDataDir = path.join(app.getPath("temp"), "OpenGraphXplorer-user-data");
+  app.setPath("userData", userDataDir);
   createWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
