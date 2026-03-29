@@ -277,15 +277,9 @@ function sortItems(items) {
 }
 
 function filterItems(items) {
-  return items.filter((item) => {
-    const searchMatch =
-      !state.view.searchText ||
-      item.name.toLowerCase().includes(state.view.searchText) ||
-      item.relPath.toLowerCase().includes(state.view.searchText);
-    const itemTags = getTagsForId(item.relPath).map((t) => t.toLowerCase());
-    const tagMatch = !state.view.tagFilter || itemTags.some((t) => t.includes(state.view.tagFilter));
-    return searchMatch && tagMatch;
-  });
+  // text + tag only (no ext) — used for graph visibility and allowed-set derivation
+  const filters = EP.buildPreFilters(state).filter((f) => f.type !== "ext");
+  return EP.applyPreFilters(items, filters, { getTagsForId });
 }
 
 function pruneStaleTags() {
@@ -305,26 +299,17 @@ function getWorkingSetItems() {
   if (!EP) {
     return getFilteredSortedItems();
   }
-  const base = EP.getBaseWorkingSetItems(state, getFilteredSortedItems);
-  const allowed = new Set(getFilteredSortedItems().map((i) => i.relPath));
-  if (!state.wsExpansion) {
-    return base;
-  }
-  let seed = base;
-  if (state.view.selectedId !== ROOT_ID) {
-    const anchor = findItemById(state.view.selectedId);
-    if (anchor) {
-      seed = [anchor];
-    }
-  }
-  const expanded = EP.applyWsExpansion(seed, state.wsExpansion, state.fsSnapshot.items, {
+  const workingSet = EP.buildWorkingSet(state.fsSnapshot.items, state, {
+    ROOT_ID,
+    getTagsForId,
     normRel,
     parentRelPath,
     itemIdFromRelPath,
     findItemByRelPath: (rel) => findItemByRelPathFlexible(rel),
+    findItemById,
     getGraphNeighborIds: (id) => getNeighborIds(id),
   });
-  return expanded.filter((i) => allowed.has(i.relPath));
+  return state.fsSnapshot.items.filter((i) => workingSet.has(i.relPath));
 }
 
 function snapshotCliState() {

@@ -2,6 +2,126 @@
 (function (global) {
   const EP = {};
 
+  // ── Filter handler registry ────────────────────────────────────────────────
+  // Each handler: (items, filterSpec, helpers) → filteredItems
+  // Register new filter types here without touching the pipeline logic.
+
+  EP.FILTER_HANDLERS = {};
+
+  EP.registerFilter = function registerFilter(type, handler) {
+    EP.FILTER_HANDLERS[type] = handler;
+  };
+
+  EP.registerFilter("text", function (items, filter) {
+    const needle = (filter.value || "").toLowerCase();
+    if (!needle) return items;
+    return items.filter(
+      (item) =>
+        item.name.toLowerCase().includes(needle) ||
+        item.relPath.toLowerCase().includes(needle),
+    );
+  });
+
+  EP.registerFilter("tag", function (items, filter, helpers) {
+    const needle = (filter.value || "").toLowerCase();
+    if (!needle) return items;
+    const getTagsForId = helpers && helpers.getTagsForId;
+    if (!getTagsForId) return items;
+    return items.filter((item) => {
+      const tags = (getTagsForId(item.relPath) || []).map((t) => t.toLowerCase());
+      return tags.some((t) => t.includes(needle));
+    });
+  });
+
+  EP.registerFilter("ext", function (items, filter) {
+    const ext = (filter.value || "").toLowerCase();
+    if (!ext) return items;
+    return items.filter((item) => {
+      if (item.type !== "file") return false;
+      const idx = item.name.lastIndexOf(".");
+      const fe =
+        idx >= 0 && idx < item.name.length - 1
+          ? item.name.slice(idx + 1).toLowerCase()
+          : "";
+      return fe === ext;
+    });
+  });
+
+  // Apply an ordered array of filter specs to an item list.
+  EP.applyPreFilters = function applyPreFilters(items, filters, helpers) {
+    let result = items;
+    for (const filter of filters || []) {
+      if (!filter || !filter.type) continue;
+      const handler = EP.FILTER_HANDLERS[filter.type];
+      if (handler) result = handler(result, filter, helpers || {});
+    }
+    return result;
+  };
+
+  // Derive the current filter spec array from state.
+  // New filter types (e.g. "concept") just need to push onto state.view.filters
+  // and register a handler — no pipeline changes required.
+  EP.buildPreFilters = function buildPreFilters(state) {
+    const filters = [];
+    if (state.view && state.view.searchText) {
+      filters.push({ type: "text", value: state.view.searchText });
+    }
+    if (state.view && state.view.tagFilter) {
+      filters.push({ type: "tag", value: state.view.tagFilter });
+    }
+    if (state.extSelection && state.extSelection.ext) {
+      filters.push({ type: "ext", value: state.extSelection.ext });
+    }
+    // Future: merge state.view.filters[] here for concept/semantic filter types
+    return filters;
+  };
+
+  // ── Three-phase working set pipeline ──────────────────────────────────────
+  //
+  //   Phase 1 (pre-filter)  — reduce: text, tag, ext
+  //   Phase 2 (expansion)   — add: children, siblings, +1, parents
+  //   Phase 3 (post-filter) — refine: intersect expanded set with allowed set
+  //
+  // Returns Set<relPath>. Rendering and sorting happen downstream.
+  //
+  // Allowed-set note: expansion is constrained by text+tag only, NOT by ext.
+  // This preserves the existing behaviour where "expand children" shows all
+  // text/tag-matching children even when an ext filter is active.
+  EP.buildWorkingSet = function buildWorkingSet(allItems, state, helpers) {
+    const ROOT_ID = helpers.ROOT_ID || "__root__";
+
+    const allFilters = EP.buildPreFilters(state);
+
+    // Allowed set: text + tag (expansion cannot exceed this; ext is excluded
+    // so that expansion can cross the ext boundary intentionally).
+    const expansionFilters = allFilters.filter((f) => f.type !== "ext");
+    const allowedSet = new Set(
+      EP.applyPreFilters(allItems, expansionFilters, helpers).map((i) => i.relPath),
+    );
+
+    // Phase 1: working set base = all pre-filters including ext
+    const base = EP.applyPreFilters(allItems, allFilters, helpers);
+
+    // Phase 2: expansion (optional)
+    if (!state.wsExpansion) {
+      return new Set(base.map((i) => i.relPath));
+    }
+
+    let seed = base;
+    if (state.view && state.view.selectedId && state.view.selectedId !== ROOT_ID) {
+      const findFn = helpers.findItemByRelPath || helpers.findItemById;
+      const anchor = findFn ? findFn(state.view.selectedId) : null;
+      if (anchor) seed = [anchor];
+    }
+
+    const expanded = EP.applyWsExpansion(seed, state.wsExpansion, allItems, helpers);
+
+    // Phase 3: post-filter — intersect with allowed set (text+tag, not ext)
+    return new Set(expanded.filter((i) => allowedSet.has(i.relPath)).map((i) => i.relPath));
+  };
+
+  // ── Backward-compatible wrapper ────────────────────────────────────────────
+  // Kept so existing call-sites (tests, etc.) continue to work unchanged.
   EP.getBaseWorkingSetItems = function getBaseWorkingSetItems(state, getFilteredSortedItems) {
     let items = getFilteredSortedItems();
     if (state.extSelection) {

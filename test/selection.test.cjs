@@ -498,6 +498,154 @@ section("21. Pipeline apply: grep + head");
   assert(lines.length <= 2, "head 2: at most 2 lines");
 }
 
+// ── Filter pipeline tests ──────────────────────────────────────────────────
+
+// Shared helpers for buildWorkingSet
+const PIPELINE_HELPERS = {
+  ROOT_ID,
+  normRel,
+  parentRelPath,
+  itemIdFromRelPath,
+  findItemByRelPath,
+  findItemById: findItemByRelPath,
+  getTagsForId: (relPath) => TAGS[relPath] || [],
+  getGraphNeighborIds: (id) => getNeighborIds(id, GRAPH_LINKS),
+};
+
+const TAGS = {};
+
+function buildWS(state, tagsOverride) {
+  const helpers = tagsOverride
+    ? { ...PIPELINE_HELPERS, getTagsForId: (r) => tagsOverride[r] || [] }
+    : PIPELINE_HELPERS;
+  const set = EP.buildWorkingSet(FS_ITEMS, state, helpers);
+  return FS_ITEMS.filter((i) => set.has(i.relPath));
+}
+
+section("22. applyPreFilters — text handler");
+{
+  const filtered = EP.applyPreFilters(FS_ITEMS, [{ type: "text", value: "ford" }], {});
+  assert(filtered.every((i) => i.name.includes("ford") || i.relPath.includes("ford")),
+    "text filter: all results contain 'ford'");
+  assert(filtered.length === 1, "text filter: exactly 1 match (ford_f150.txt)");
+}
+
+section("23. applyPreFilters — ext handler");
+{
+  const filtered = EP.applyPreFilters(FS_ITEMS, [{ type: "ext", value: "txt" }], {});
+  assert(filtered.every((i) => i.type === "file"), "ext filter: only files");
+  assert(filtered.every((i) => i.name.endsWith(".txt")), "ext filter: all end in .txt");
+  assert(filtered.length === 6, "ext filter: 6 txt files");
+}
+
+section("24. applyPreFilters — tag handler");
+{
+  const tags = { "billybob/ford_f150.txt": ["urgent"], "henry/honda_civic.txt": ["urgent"] };
+  const filtered = EP.applyPreFilters(
+    FS_ITEMS,
+    [{ type: "tag", value: "urgent" }],
+    { getTagsForId: (r) => tags[r] || [] },
+  );
+  assert(filtered.length === 2, "tag filter: 2 items tagged urgent");
+  assert(filtered.some((i) => i.name === "ford_f150.txt"), "tag filter: ford included");
+  assert(filtered.some((i) => i.name === "honda_civic.txt"), "tag filter: honda included");
+}
+
+section("25. applyPreFilters — chained text + ext");
+{
+  const filtered = EP.applyPreFilters(
+    FS_ITEMS,
+    [{ type: "text", value: "billybob" }, { type: "ext", value: "txt" }],
+    {},
+  );
+  assert(filtered.every((i) => i.relPath.includes("billybob")), "chained: all in billybob");
+  assert(filtered.every((i) => i.name.endsWith(".txt")), "chained: all .txt");
+  assert(filtered.length === 3, "chained text+ext: 3 results");
+}
+
+section("26. buildPreFilters — derives from state");
+{
+  const state = makeState({
+    view: { searchText: "ford", tagFilter: "", selectedId: ROOT_ID },
+    extSelection: { ext: "txt", folderIds: new Set() },
+  });
+  const filters = EP.buildPreFilters(state);
+  assert(filters.some((f) => f.type === "text" && f.value === "ford"), "buildPreFilters: text filter present");
+  assert(filters.some((f) => f.type === "ext" && f.value === "txt"), "buildPreFilters: ext filter present");
+  assert(filters.length === 2, "buildPreFilters: exactly 2 filters (text + ext)");
+}
+
+section("27. buildWorkingSet — no filters, returns all items");
+{
+  const state = makeState();
+  const ws = buildWS(state);
+  assert(ws.length === FS_ITEMS.length, "buildWorkingSet: no filters → all items");
+}
+
+section("28. buildWorkingSet — text filter");
+{
+  const state = makeState({ view: { searchText: "ford", tagFilter: "", selectedId: ROOT_ID } });
+  const ws = buildWS(state);
+  assert(ws.every((i) => i.name.includes("ford") || i.relPath.includes("ford")),
+    "buildWorkingSet text: all results match");
+  assert(ws.length === 1, "buildWorkingSet text: 1 result");
+}
+
+section("29. buildWorkingSet — ext filter");
+{
+  const state = makeState({ extSelection: { ext: "txt", folderIds: new Set() } });
+  const ws = buildWS(state);
+  assert(ws.every((i) => i.type === "file"), "buildWorkingSet ext: files only");
+  assert(ws.length === 6, "buildWorkingSet ext: 6 txt files");
+}
+
+section("30. buildWorkingSet — expansion crosses ext boundary (allowed = text+tag, not ext)");
+{
+  // ext filter is active, but expansion should still include items regardless of ext
+  // because the allowed set excludes ext by design
+  const state = makeState({
+    view: { searchText: "", tagFilter: "", selectedId: "billybob" },
+    extSelection: { ext: "txt", folderIds: new Set() },
+    wsExpansion: "children",
+  });
+  const ws = buildWS(state);
+  const names = ws.map((i) => i.name);
+  // expansion from billybob should include its .txt children
+  assert(names.includes("ford_f150.txt"), "expansion+ext: ford included");
+  assert(names.includes("jeep_wrangler.txt"), "expansion+ext: jeep included");
+  // billybob itself (the seed) is a folder — ext applies to base, not allowed set
+  // so billybob folder may or may not be in set depending on ext-only-files behavior
+  assert(!names.includes("honda_civic.txt"), "expansion+ext: honda (wrong parent) excluded");
+}
+
+section("31. buildWorkingSet — output is a Set (correct deduplication)");
+{
+  const state = makeState({
+    view: { searchText: "billybob", tagFilter: "", selectedId: ROOT_ID },
+    wsExpansion: "children",
+  });
+  const ws = buildWS(state);
+  const relPaths = ws.map((i) => i.relPath);
+  const unique = new Set(relPaths);
+  assert(relPaths.length === unique.size, "buildWorkingSet: no duplicate entries");
+}
+
+section("32. registerFilter — custom filter type");
+{
+  EP.registerFilter("name-starts-with", function (items, filter) {
+    return items.filter((i) => i.name.startsWith(filter.value));
+  });
+  const filtered = EP.applyPreFilters(
+    FS_ITEMS,
+    [{ type: "name-starts-with", value: "ford" }],
+    {},
+  );
+  assert(filtered.length === 1, "custom filter: 1 item starting with 'ford'");
+  assert(filtered[0].name === "ford_f150.txt", "custom filter: correct item");
+  // Clean up
+  delete EP.FILTER_HANDLERS["name-starts-with"];
+}
+
 // ── Summary ────────────────────────────────────────────────────────────────
 
 console.log(`\n${"─".repeat(50)}`);
